@@ -1,7 +1,872 @@
 package helm
 
-// Generate creates a Helm chart structure from conversion results.
-// TODO: implement in Prompt 7
-func Generate() error {
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/compositor/kompoze/internal/converter"
+	"github.com/compositor/kompoze/internal/parser"
+	"github.com/compositor/kompoze/internal/wizard"
+)
+
+// GenerateOptions holds configuration for Helm chart generation.
+type GenerateOptions struct {
+	OutputDir string
+	AppName   string
+	Namespace string
+}
+
+// Generate creates a full Helm chart structure from a compose file and conversion result.
+func Generate(compose *parser.ComposeFile, result *converter.ConvertResult, opts GenerateOptions) error {
+	chartDir := opts.OutputDir
+	templatesDir := filepath.Join(chartDir, "templates")
+
+	if err := os.MkdirAll(templatesDir, 0755); err != nil {
+		return fmt.Errorf("creating chart directories: %w", err)
+	}
+
+	appName := opts.AppName
+	if appName == "" {
+		appName = "kompoze-app"
+	}
+
+	// Collect service info for values.yaml and templates
+	services := buildServiceInfos(compose, result)
+
+	// Generate Chart.yaml
+	if err := writeFile(filepath.Join(chartDir, "Chart.yaml"), generateChartYAML(appName)); err != nil {
+		return err
+	}
+
+	// Generate values.yaml
+	if err := writeFile(filepath.Join(chartDir, "values.yaml"), generateValuesYAML(services, opts)); err != nil {
+		return err
+	}
+
+	// Generate _helpers.tpl
+	if err := writeFile(filepath.Join(templatesDir, "_helpers.tpl"), generateHelpersTpl(appName)); err != nil {
+		return err
+	}
+
+	// Generate NOTES.txt
+	if err := writeFile(filepath.Join(templatesDir, "NOTES.txt"), generateNotesTxt(services)); err != nil {
+		return err
+	}
+
+	// Generate per-service templates
+	for _, svc := range services {
+		if err := generateServiceTemplates(templatesDir, svc, appName); err != nil {
+			return fmt.Errorf("generating templates for %s: %w", svc.Name, err)
+		}
+	}
+
 	return nil
+}
+
+// serviceInfo holds extracted data about a compose service for template generation.
+type serviceInfo struct {
+	Name           string
+	Image          string
+	ImageTag       string
+	Replicas       int32
+	Ports          []portInfo
+	EnvVars        map[string]string
+	SecretVars     map[string]string
+	HasVolumes     bool
+	VolumeName     string
+	VolumeMount    string
+	HasIngress     bool
+	HasHPA         bool
+	HasPDB         bool
+	HasNetPolicy   bool
+	IsDatabase     bool
+	ServiceType    wizard.ServiceType
+	CPURequest     string
+	MemoryRequest  string
+	CPULimit       string
+	MemoryLimit    string
+}
+
+type portInfo struct {
+	Name          string
+	ContainerPort int32
+	ServicePort   int32
+	Protocol      string
+}
+
+func buildServiceInfos(compose *parser.ComposeFile, result *converter.ConvertResult) []serviceInfo {
+	names := make([]string, 0, len(compose.Services))
+	for name := range compose.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var services []serviceInfo
+	for _, name := range names {
+		svc := compose.Services[name]
+		st := wizard.DetectServiceType(svc.Image)
+
+		info := serviceInfo{
+			Name:          name,
+			Replicas:      1,
+			ServiceType:   st,
+			IsDatabase:    st == wizard.ServiceTypeDatabase,
+			CPURequest:    "100m",
+			MemoryRequest: "128Mi",
+			CPULimit:      "500m",
+			MemoryLimit:   "256Mi",
+		}
+
+		// Parse image:tag
+		image := svc.Image
+		tag := "latest"
+		if idx := strings.LastIndex(image, ":"); idx > 0 {
+			tag = image[idx+1:]
+			image = image[:idx]
+		}
+		info.Image = image
+		info.ImageTag = tag
+
+		// Replicas
+		if svc.Deploy != nil && svc.Deploy.Replicas != nil {
+			info.Replicas = int32(*svc.Deploy.Replicas)
+		}
+
+		// Ports
+		for i, p := range svc.Ports {
+			pi := portInfo{
+				Name:          fmt.Sprintf("port-%d", i),
+				ContainerPort: int32(p.ContainerPort),
+				ServicePort:   int32(p.ContainerPort),
+				Protocol:      "TCP",
+			}
+			if p.HostPort > 0 && p.HostPort != p.ContainerPort {
+				pi.ServicePort = int32(p.HostPort)
+			}
+			if p.Protocol == "udp" {
+				pi.Protocol = "UDP"
+			}
+			info.Ports = append(info.Ports, pi)
+		}
+
+		// Environment variables
+		info.EnvVars = make(map[string]string)
+		info.SecretVars = make(map[string]string)
+		for k, v := range svc.Environment {
+			if isSensitiveKey(k) {
+				info.SecretVars[k] = v
+			} else {
+				info.EnvVars[k] = v
+			}
+		}
+
+		// Volumes
+		for _, vol := range svc.Volumes {
+			if vol.Type == "volume" {
+				info.HasVolumes = true
+				info.VolumeName = vol.Source
+				info.VolumeMount = vol.Target
+				break
+			}
+		}
+
+		// Check if result has corresponding resources
+		for _, ing := range result.Ingresses {
+			if ing.Name == name {
+				info.HasIngress = true
+				break
+			}
+		}
+		for _, hpa := range result.HPAs {
+			if hpa.Name == name {
+				info.HasHPA = true
+				break
+			}
+		}
+		for _, pdb := range result.PDBs {
+			if pdb.Name == name {
+				info.HasPDB = true
+				break
+			}
+		}
+		for _, np := range result.NetworkPolicies {
+			if np.Name == name {
+				info.HasNetPolicy = true
+				break
+			}
+		}
+
+		services = append(services, info)
+	}
+
+	return services
+}
+
+func generateChartYAML(appName string) string {
+	return fmt.Sprintf(`apiVersion: v2
+name: %s
+description: Generated by kompoze from docker-compose.yml
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+`, appName)
+}
+
+func generateValuesYAML(services []serviceInfo, opts GenerateOptions) string {
+	var sb strings.Builder
+
+	sb.WriteString("# Generated by kompoze - Customize values for your environment\n\n")
+
+	sb.WriteString("global:\n")
+	sb.WriteString(fmt.Sprintf("  namespace: %s\n", opts.Namespace))
+	sb.WriteString("  imagePullSecrets: []\n\n")
+
+	for _, svc := range services {
+		sb.WriteString(fmt.Sprintf("# --- %s ---\n", svc.Name))
+		sb.WriteString(fmt.Sprintf("%s:\n", svc.Name))
+		sb.WriteString("  enabled: true\n\n")
+
+		sb.WriteString("  image:\n")
+		sb.WriteString(fmt.Sprintf("    repository: %s\n", svc.Image))
+		sb.WriteString(fmt.Sprintf("    tag: \"%s\"\n", svc.ImageTag))
+		sb.WriteString("    pullPolicy: IfNotPresent\n\n")
+
+		sb.WriteString(fmt.Sprintf("  replicas: %d\n\n", svc.Replicas))
+
+		sb.WriteString("  resources:\n")
+		sb.WriteString("    requests:\n")
+		sb.WriteString(fmt.Sprintf("      cpu: %s\n", svc.CPURequest))
+		sb.WriteString(fmt.Sprintf("      memory: %s\n", svc.MemoryRequest))
+		sb.WriteString("    limits:\n")
+		sb.WriteString(fmt.Sprintf("      cpu: %s\n", svc.CPULimit))
+		sb.WriteString(fmt.Sprintf("      memory: %s\n", svc.MemoryLimit))
+		sb.WriteString("\n")
+
+		// Service section
+		if len(svc.Ports) > 0 {
+			sb.WriteString("  service:\n")
+			sb.WriteString("    type: ClusterIP\n")
+			sb.WriteString(fmt.Sprintf("    port: %d\n", svc.Ports[0].ServicePort))
+			sb.WriteString("\n")
+		}
+
+		// Ingress section
+		sb.WriteString("  ingress:\n")
+		sb.WriteString(fmt.Sprintf("    enabled: %t\n", svc.HasIngress))
+		sb.WriteString("    className: nginx\n")
+		sb.WriteString(fmt.Sprintf("    host: %s.example.com\n", svc.Name))
+		sb.WriteString("    tls: true\n\n")
+
+		// HPA section
+		sb.WriteString("  hpa:\n")
+		sb.WriteString(fmt.Sprintf("    enabled: %t\n", svc.HasHPA))
+		sb.WriteString("    minReplicas: 2\n")
+		sb.WriteString("    maxReplicas: 10\n")
+		sb.WriteString("    targetCPUUtilization: 70\n\n")
+
+		// PDB section
+		sb.WriteString("  pdb:\n")
+		sb.WriteString(fmt.Sprintf("    enabled: %t\n", svc.HasPDB))
+		sb.WriteString("    minAvailable: 1\n\n")
+
+		// Environment variables
+		if len(svc.EnvVars) > 0 {
+			sb.WriteString("  env:\n")
+			keys := sortedKeys(svc.EnvVars)
+			for _, k := range keys {
+				sb.WriteString(fmt.Sprintf("    %s: \"%s\"\n", k, svc.EnvVars[k]))
+			}
+			sb.WriteString("\n")
+		}
+
+		// Secrets
+		if len(svc.SecretVars) > 0 {
+			sb.WriteString("  secrets:\n")
+			keys := sortedKeys(svc.SecretVars)
+			for _, k := range keys {
+				sb.WriteString(fmt.Sprintf("    %s: \"CHANGE_ME\"  # do not commit real secrets\n", k))
+			}
+			sb.WriteString("\n")
+		}
+
+		// Persistence
+		sb.WriteString("  persistence:\n")
+		sb.WriteString(fmt.Sprintf("    enabled: %t\n", svc.HasVolumes))
+		sb.WriteString("    size: 1Gi\n")
+		sb.WriteString("    storageClass: \"\"\n")
+		sb.WriteString("    accessMode: ReadWriteOnce\n")
+
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func generateHelpersTpl(appName string) string {
+	return fmt.Sprintf(`{{/*
+Chart name.
+*/}}
+{{- define "%s.name" -}}
+{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Fully qualified app name.
+*/}}
+{{- define "%s.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- if contains $name .Release.Name }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%%s-%%s" .Release.Name $name | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Common labels.
+*/}}
+{{- define "%s.labels" -}}
+helm.sh/chart: {{ include "%s.name" . }}-{{ .Chart.Version | replace "+" "_" }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: {{ include "%s.name" . }}
+{{- end }}
+
+{{/*
+Selector labels for a specific service.
+*/}}
+{{- define "%s.selectorLabels" -}}
+app.kubernetes.io/name: {{ . }}
+{{- end }}
+`, appName, appName, appName, appName, appName, appName)
+}
+
+func generateNotesTxt(services []serviceInfo) string {
+	var sb strings.Builder
+
+	sb.WriteString("Thank you for installing {{ .Chart.Name }}.\n\n")
+	sb.WriteString("Your application has been deployed with the following services:\n\n")
+
+	for _, svc := range services {
+		sb.WriteString(fmt.Sprintf("  - %s\n", svc.Name))
+	}
+
+	sb.WriteString("\n")
+
+	for _, svc := range services {
+		if svc.HasIngress {
+			sb.WriteString(fmt.Sprintf("{{- if .Values.%s.ingress.enabled }}\n", svc.Name))
+			sb.WriteString(fmt.Sprintf("  %s is available at:\n", svc.Name))
+			sb.WriteString(fmt.Sprintf("  {{- if .Values.%s.ingress.tls }}\n", svc.Name))
+			sb.WriteString(fmt.Sprintf("    https://{{ .Values.%s.ingress.host }}\n", svc.Name))
+			sb.WriteString("  {{- else }}\n")
+			sb.WriteString(fmt.Sprintf("    http://{{ .Values.%s.ingress.host }}\n", svc.Name))
+			sb.WriteString("  {{- end }}\n")
+			sb.WriteString("{{- end }}\n\n")
+		}
+	}
+
+	sb.WriteString("Generated by kompoze (https://github.com/compositor/kompoze)\n")
+	return sb.String()
+}
+
+func generateServiceTemplates(templatesDir string, svc serviceInfo, appName string) error {
+	// Deployment template
+	if err := writeFile(
+		filepath.Join(templatesDir, svc.Name+"-deployment.yaml"),
+		generateDeploymentTemplate(svc, appName),
+	); err != nil {
+		return err
+	}
+
+	// Service template (if ports)
+	if len(svc.Ports) > 0 {
+		if err := writeFile(
+			filepath.Join(templatesDir, svc.Name+"-service.yaml"),
+			generateServiceTemplate(svc, appName),
+		); err != nil {
+			return err
+		}
+	}
+
+	// ConfigMap template (if env vars)
+	if len(svc.EnvVars) > 0 {
+		if err := writeFile(
+			filepath.Join(templatesDir, svc.Name+"-configmap.yaml"),
+			generateConfigMapTemplate(svc, appName),
+		); err != nil {
+			return err
+		}
+	}
+
+	// Secret template (if secret vars)
+	if len(svc.SecretVars) > 0 {
+		if err := writeFile(
+			filepath.Join(templatesDir, svc.Name+"-secret.yaml"),
+			generateSecretTemplate(svc, appName),
+		); err != nil {
+			return err
+		}
+	}
+
+	// ServiceAccount
+	if err := writeFile(
+		filepath.Join(templatesDir, svc.Name+"-serviceaccount.yaml"),
+		generateServiceAccountTemplate(svc, appName),
+	); err != nil {
+		return err
+	}
+
+	// PVC template (if volumes)
+	if svc.HasVolumes {
+		if err := writeFile(
+			filepath.Join(templatesDir, svc.Name+"-pvc.yaml"),
+			generatePVCTemplate(svc, appName),
+		); err != nil {
+			return err
+		}
+	}
+
+	// Ingress template
+	if svc.HasIngress {
+		if err := writeFile(
+			filepath.Join(templatesDir, svc.Name+"-ingress.yaml"),
+			generateIngressTemplate(svc, appName),
+		); err != nil {
+			return err
+		}
+	}
+
+	// HPA template
+	if svc.HasHPA {
+		if err := writeFile(
+			filepath.Join(templatesDir, svc.Name+"-hpa.yaml"),
+			generateHPATemplate(svc, appName),
+		); err != nil {
+			return err
+		}
+	}
+
+	// PDB template
+	if svc.HasPDB {
+		if err := writeFile(
+			filepath.Join(templatesDir, svc.Name+"-pdb.yaml"),
+			generatePDBTemplate(svc, appName),
+		); err != nil {
+			return err
+		}
+	}
+
+	// NetworkPolicy template
+	if svc.HasNetPolicy {
+		if err := writeFile(
+			filepath.Join(templatesDir, svc.Name+"-networkpolicy.yaml"),
+			generateNetworkPolicyTemplate(svc, appName),
+		); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func generateDeploymentTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if .Values.%s.enabled }}\n", svc.Name))
+	sb.WriteString("apiVersion: apps/v1\n")
+	sb.WriteString("kind: Deployment\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString(fmt.Sprintf("    app.kubernetes.io/name: %s\n", svc.Name))
+	sb.WriteString("spec:\n")
+
+	// Only set replicas if HPA is not enabled
+	if svc.HasHPA {
+		sb.WriteString(fmt.Sprintf("  {{- if not .Values.%s.hpa.enabled }}\n", svc.Name))
+		sb.WriteString(fmt.Sprintf("  replicas: {{ .Values.%s.replicas }}\n", svc.Name))
+		sb.WriteString("  {{- end }}\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("  replicas: {{ .Values.%s.replicas }}\n", svc.Name))
+	}
+
+	sb.WriteString("  selector:\n")
+	sb.WriteString("    matchLabels:\n")
+	sb.WriteString(fmt.Sprintf("      app.kubernetes.io/name: %s\n", svc.Name))
+	sb.WriteString("  template:\n")
+	sb.WriteString("    metadata:\n")
+	sb.WriteString("      labels:\n")
+	sb.WriteString(fmt.Sprintf("        {{- include \"%s.labels\" . | nindent 8 }}\n", appName))
+	sb.WriteString(fmt.Sprintf("        app.kubernetes.io/name: %s\n", svc.Name))
+	sb.WriteString("    spec:\n")
+	sb.WriteString(fmt.Sprintf("      serviceAccountName: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("      securityContext:\n")
+	sb.WriteString("        runAsNonRoot: true\n")
+	sb.WriteString("        fsGroup: 1000\n")
+	sb.WriteString("      containers:\n")
+	sb.WriteString(fmt.Sprintf("        - name: %s\n", svc.Name))
+	sb.WriteString(fmt.Sprintf("          image: \"{{ .Values.%s.image.repository }}:{{ .Values.%s.image.tag }}\"\n", svc.Name, svc.Name))
+	sb.WriteString(fmt.Sprintf("          imagePullPolicy: {{ .Values.%s.image.pullPolicy }}\n", svc.Name))
+
+	// Ports
+	if len(svc.Ports) > 0 {
+		sb.WriteString("          ports:\n")
+		for _, p := range svc.Ports {
+			sb.WriteString(fmt.Sprintf("            - name: %s\n", p.Name))
+			sb.WriteString(fmt.Sprintf("              containerPort: %d\n", p.ContainerPort))
+			sb.WriteString(fmt.Sprintf("              protocol: %s\n", p.Protocol))
+		}
+	}
+
+	// Environment from ConfigMap
+	if len(svc.EnvVars) > 0 {
+		sb.WriteString("          envFrom:\n")
+		sb.WriteString(fmt.Sprintf("            - configMapRef:\n"))
+		sb.WriteString(fmt.Sprintf("                name: {{ include \"%s.fullname\" . }}-%s-config\n", appName, svc.Name))
+	}
+
+	// Environment from Secret
+	if len(svc.SecretVars) > 0 {
+		keys := sortedKeys(svc.SecretVars)
+		sb.WriteString("          env:\n")
+		for _, k := range keys {
+			sb.WriteString(fmt.Sprintf("            - name: %s\n", k))
+			sb.WriteString("              valueFrom:\n")
+			sb.WriteString("                secretKeyRef:\n")
+			sb.WriteString(fmt.Sprintf("                  name: {{ include \"%s.fullname\" . }}-%s-secret\n", appName, svc.Name))
+			sb.WriteString(fmt.Sprintf("                  key: %s\n", k))
+		}
+	}
+
+	// Resources
+	sb.WriteString("          resources:\n")
+	sb.WriteString(fmt.Sprintf("            {{- toYaml .Values.%s.resources | nindent 12 }}\n", svc.Name))
+
+	// Security context
+	sb.WriteString("          securityContext:\n")
+	sb.WriteString("            allowPrivilegeEscalation: false\n")
+	sb.WriteString("            readOnlyRootFilesystem: true\n")
+	sb.WriteString("            capabilities:\n")
+	sb.WriteString("              drop:\n")
+	sb.WriteString("                - ALL\n")
+
+	// Probes for services with ports
+	if len(svc.Ports) > 0 {
+		port := svc.Ports[0]
+		if isHTTPPort(uint32(port.ContainerPort)) {
+			sb.WriteString("          livenessProbe:\n")
+			sb.WriteString("            httpGet:\n")
+			sb.WriteString("              path: /\n")
+			sb.WriteString(fmt.Sprintf("              port: %d\n", port.ContainerPort))
+			sb.WriteString("            initialDelaySeconds: 10\n")
+			sb.WriteString("            periodSeconds: 15\n")
+			sb.WriteString("          readinessProbe:\n")
+			sb.WriteString("            httpGet:\n")
+			sb.WriteString("              path: /\n")
+			sb.WriteString(fmt.Sprintf("              port: %d\n", port.ContainerPort))
+			sb.WriteString("            initialDelaySeconds: 5\n")
+			sb.WriteString("            periodSeconds: 15\n")
+		} else {
+			sb.WriteString("          livenessProbe:\n")
+			sb.WriteString("            tcpSocket:\n")
+			sb.WriteString(fmt.Sprintf("              port: %d\n", port.ContainerPort))
+			sb.WriteString("            initialDelaySeconds: 10\n")
+			sb.WriteString("            periodSeconds: 15\n")
+			sb.WriteString("          readinessProbe:\n")
+			sb.WriteString("            tcpSocket:\n")
+			sb.WriteString(fmt.Sprintf("              port: %d\n", port.ContainerPort))
+			sb.WriteString("            initialDelaySeconds: 5\n")
+			sb.WriteString("            periodSeconds: 15\n")
+		}
+	}
+
+	// Volume mounts
+	if svc.HasVolumes {
+		sb.WriteString(fmt.Sprintf("          {{- if .Values.%s.persistence.enabled }}\n", svc.Name))
+		sb.WriteString("          volumeMounts:\n")
+		sb.WriteString(fmt.Sprintf("            - name: %s-data\n", svc.Name))
+		sb.WriteString(fmt.Sprintf("              mountPath: %s\n", svc.VolumeMount))
+		sb.WriteString("          {{- end }}\n")
+	}
+
+	// Pod volumes
+	if svc.HasVolumes {
+		sb.WriteString(fmt.Sprintf("      {{- if .Values.%s.persistence.enabled }}\n", svc.Name))
+		sb.WriteString("      volumes:\n")
+		sb.WriteString(fmt.Sprintf("        - name: %s-data\n", svc.Name))
+		sb.WriteString("          persistentVolumeClaim:\n")
+		sb.WriteString(fmt.Sprintf("            claimName: {{ include \"%s.fullname\" . }}-%s-data\n", appName, svc.Name))
+		sb.WriteString("      {{- end }}\n")
+	}
+
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generateServiceTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if .Values.%s.enabled }}\n", svc.Name))
+	sb.WriteString("apiVersion: v1\n")
+	sb.WriteString("kind: Service\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString(fmt.Sprintf("    app.kubernetes.io/name: %s\n", svc.Name))
+	sb.WriteString("spec:\n")
+	sb.WriteString(fmt.Sprintf("  type: {{ .Values.%s.service.type | default \"ClusterIP\" }}\n", svc.Name))
+	sb.WriteString("  selector:\n")
+	sb.WriteString(fmt.Sprintf("    app.kubernetes.io/name: %s\n", svc.Name))
+	sb.WriteString("  ports:\n")
+	for _, p := range svc.Ports {
+		sb.WriteString(fmt.Sprintf("    - name: %s\n", p.Name))
+		sb.WriteString(fmt.Sprintf("      port: {{ .Values.%s.service.port | default %d }}\n", svc.Name, p.ServicePort))
+		sb.WriteString(fmt.Sprintf("      targetPort: %d\n", p.ContainerPort))
+		sb.WriteString(fmt.Sprintf("      protocol: %s\n", p.Protocol))
+	}
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generateConfigMapTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if .Values.%s.enabled }}\n", svc.Name))
+	sb.WriteString(fmt.Sprintf("{{- if .Values.%s.env }}\n", svc.Name))
+	sb.WriteString("apiVersion: v1\n")
+	sb.WriteString("kind: ConfigMap\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s-config\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString("data:\n")
+	sb.WriteString(fmt.Sprintf("  {{- range $key, $value := .Values.%s.env }}\n", svc.Name))
+	sb.WriteString("  {{ $key }}: {{ $value | quote }}\n")
+	sb.WriteString("  {{- end }}\n")
+	sb.WriteString("{{- end }}\n")
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generateSecretTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if .Values.%s.enabled }}\n", svc.Name))
+	sb.WriteString(fmt.Sprintf("{{- if .Values.%s.secrets }}\n", svc.Name))
+	sb.WriteString("apiVersion: v1\n")
+	sb.WriteString("kind: Secret\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s-secret\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString("type: Opaque\n")
+	sb.WriteString("stringData:\n")
+	sb.WriteString(fmt.Sprintf("  {{- range $key, $value := .Values.%s.secrets }}\n", svc.Name))
+	sb.WriteString("  {{ $key }}: {{ $value | quote }}\n")
+	sb.WriteString("  {{- end }}\n")
+	sb.WriteString("{{- end }}\n")
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generateServiceAccountTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if .Values.%s.enabled }}\n", svc.Name))
+	sb.WriteString("apiVersion: v1\n")
+	sb.WriteString("kind: ServiceAccount\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString("automountServiceAccountToken: false\n")
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generatePVCTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if and .Values.%s.enabled .Values.%s.persistence.enabled }}\n", svc.Name, svc.Name))
+	sb.WriteString("apiVersion: v1\n")
+	sb.WriteString("kind: PersistentVolumeClaim\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s-data\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString("spec:\n")
+	sb.WriteString(fmt.Sprintf("  accessModes:\n    - {{ .Values.%s.persistence.accessMode | default \"ReadWriteOnce\" }}\n", svc.Name))
+	sb.WriteString("  resources:\n")
+	sb.WriteString("    requests:\n")
+	sb.WriteString(fmt.Sprintf("      storage: {{ .Values.%s.persistence.size | default \"1Gi\" }}\n", svc.Name))
+	sb.WriteString(fmt.Sprintf("  {{- if .Values.%s.persistence.storageClass }}\n", svc.Name))
+	sb.WriteString(fmt.Sprintf("  storageClassName: {{ .Values.%s.persistence.storageClass }}\n", svc.Name))
+	sb.WriteString("  {{- end }}\n")
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generateIngressTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if and .Values.%s.enabled .Values.%s.ingress.enabled }}\n", svc.Name, svc.Name))
+	sb.WriteString("apiVersion: networking.k8s.io/v1\n")
+	sb.WriteString("kind: Ingress\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString("  annotations:\n")
+	sb.WriteString(fmt.Sprintf("    {{- if .Values.%s.ingress.tls }}\n", svc.Name))
+	sb.WriteString("    cert-manager.io/cluster-issuer: letsencrypt-prod\n")
+	sb.WriteString("    {{- end }}\n")
+	sb.WriteString("spec:\n")
+	sb.WriteString(fmt.Sprintf("  ingressClassName: {{ .Values.%s.ingress.className | default \"nginx\" }}\n", svc.Name))
+	sb.WriteString(fmt.Sprintf("  {{- if .Values.%s.ingress.tls }}\n", svc.Name))
+	sb.WriteString("  tls:\n")
+	sb.WriteString("    - hosts:\n")
+	sb.WriteString(fmt.Sprintf("        - {{ .Values.%s.ingress.host }}\n", svc.Name))
+	sb.WriteString(fmt.Sprintf("      secretName: {{ include \"%s.fullname\" . }}-%s-tls\n", appName, svc.Name))
+	sb.WriteString("  {{- end }}\n")
+	sb.WriteString("  rules:\n")
+	sb.WriteString(fmt.Sprintf("    - host: {{ .Values.%s.ingress.host }}\n", svc.Name))
+	sb.WriteString("      http:\n")
+	sb.WriteString("        paths:\n")
+	sb.WriteString("          - path: /\n")
+	sb.WriteString("            pathType: Prefix\n")
+	sb.WriteString("            backend:\n")
+	sb.WriteString("              service:\n")
+	sb.WriteString(fmt.Sprintf("                name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("                port:\n")
+	if len(svc.Ports) > 0 {
+		sb.WriteString(fmt.Sprintf("                  number: {{ .Values.%s.service.port | default %d }}\n", svc.Name, svc.Ports[0].ServicePort))
+	}
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generateHPATemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if and .Values.%s.enabled .Values.%s.hpa.enabled }}\n", svc.Name, svc.Name))
+	sb.WriteString("apiVersion: autoscaling/v2\n")
+	sb.WriteString("kind: HorizontalPodAutoscaler\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString("spec:\n")
+	sb.WriteString("  scaleTargetRef:\n")
+	sb.WriteString("    apiVersion: apps/v1\n")
+	sb.WriteString("    kind: Deployment\n")
+	sb.WriteString(fmt.Sprintf("    name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString(fmt.Sprintf("  minReplicas: {{ .Values.%s.hpa.minReplicas | default 2 }}\n", svc.Name))
+	sb.WriteString(fmt.Sprintf("  maxReplicas: {{ .Values.%s.hpa.maxReplicas | default 10 }}\n", svc.Name))
+	sb.WriteString("  metrics:\n")
+	sb.WriteString("    - type: Resource\n")
+	sb.WriteString("      resource:\n")
+	sb.WriteString("        name: cpu\n")
+	sb.WriteString("        target:\n")
+	sb.WriteString("          type: Utilization\n")
+	sb.WriteString(fmt.Sprintf("          averageUtilization: {{ .Values.%s.hpa.targetCPUUtilization | default 70 }}\n", svc.Name))
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generatePDBTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if and .Values.%s.enabled .Values.%s.pdb.enabled }}\n", svc.Name, svc.Name))
+	sb.WriteString("apiVersion: policy/v1\n")
+	sb.WriteString("kind: PodDisruptionBudget\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString("spec:\n")
+	sb.WriteString(fmt.Sprintf("  minAvailable: {{ .Values.%s.pdb.minAvailable | default 1 }}\n", svc.Name))
+	sb.WriteString("  selector:\n")
+	sb.WriteString("    matchLabels:\n")
+	sb.WriteString(fmt.Sprintf("      app.kubernetes.io/name: %s\n", svc.Name))
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+func generateNetworkPolicyTemplate(svc serviceInfo, appName string) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("{{- if .Values.%s.enabled }}\n", svc.Name))
+	sb.WriteString("apiVersion: networking.k8s.io/v1\n")
+	sb.WriteString("kind: NetworkPolicy\n")
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  name: {{ include \"%s.fullname\" . }}-%s\n", appName, svc.Name))
+	sb.WriteString("  labels:\n")
+	sb.WriteString(fmt.Sprintf("    {{- include \"%s.labels\" . | nindent 4 }}\n", appName))
+	sb.WriteString("spec:\n")
+	sb.WriteString("  podSelector:\n")
+	sb.WriteString("    matchLabels:\n")
+	sb.WriteString(fmt.Sprintf("      app.kubernetes.io/name: %s\n", svc.Name))
+	sb.WriteString("  policyTypes:\n")
+	sb.WriteString("    - Ingress\n")
+	sb.WriteString("    - Egress\n")
+	sb.WriteString("  ingress:\n")
+	sb.WriteString("    - from:\n")
+	sb.WriteString("        - podSelector:\n")
+	sb.WriteString("            matchLabels:\n")
+	sb.WriteString("              app.kubernetes.io/managed-by: kompoze\n")
+	if len(svc.Ports) > 0 {
+		sb.WriteString("      ports:\n")
+		for _, p := range svc.Ports {
+			sb.WriteString(fmt.Sprintf("        - protocol: %s\n", p.Protocol))
+			sb.WriteString(fmt.Sprintf("          port: %d\n", p.ContainerPort))
+		}
+	}
+	sb.WriteString("  egress:\n")
+	sb.WriteString("    - ports:\n")
+	sb.WriteString("        - protocol: UDP\n")
+	sb.WriteString("          port: 53\n")
+	sb.WriteString("        - protocol: TCP\n")
+	sb.WriteString("          port: 53\n")
+	sb.WriteString("{{- end }}\n")
+	return sb.String()
+}
+
+// --- Helpers ---
+
+func writeFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0644)
+}
+
+func isSensitiveKey(key string) bool {
+	upper := strings.ToUpper(key)
+	patterns := []string{"PASSWORD", "SECRET", "TOKEN", "KEY", "CREDENTIALS", "API_KEY", "PRIVATE"}
+	for _, p := range patterns {
+		if strings.Contains(upper, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHTTPPort(port uint32) bool {
+	httpPorts := map[uint32]bool{80: true, 443: true, 8080: true, 3000: true, 5000: true, 8000: true, 8443: true}
+	return httpPorts[port]
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
