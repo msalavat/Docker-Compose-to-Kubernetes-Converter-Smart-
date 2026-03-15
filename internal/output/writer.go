@@ -75,6 +75,31 @@ func writeMultipleFiles(result *converter.ConvertResult, outputDir string) error
 			return err
 		}
 	}
+	for _, ing := range result.Ingresses {
+		if err := writeResource(outputDir, ing.Name+"-ingress.yaml", &ing); err != nil {
+			return err
+		}
+	}
+	for _, hpa := range result.HPAs {
+		if err := writeResource(outputDir, hpa.Name+"-hpa.yaml", &hpa); err != nil {
+			return err
+		}
+	}
+	for _, pdb := range result.PDBs {
+		if err := writeResource(outputDir, pdb.Name+"-pdb.yaml", &pdb); err != nil {
+			return err
+		}
+	}
+	for _, sa := range result.ServiceAccounts {
+		if err := writeResource(outputDir, sa.Name+"-serviceaccount.yaml", &sa); err != nil {
+			return err
+		}
+	}
+	for _, np := range result.NetworkPolicies {
+		if err := writeResource(outputDir, np.Name+"-networkpolicy.yaml", &np); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -110,6 +135,21 @@ func collectObjects(result *converter.ConvertResult) []runtime.Object {
 	}
 	for i := range result.PVCs {
 		objects = append(objects, &result.PVCs[i])
+	}
+	for i := range result.Ingresses {
+		objects = append(objects, &result.Ingresses[i])
+	}
+	for i := range result.HPAs {
+		objects = append(objects, &result.HPAs[i])
+	}
+	for i := range result.PDBs {
+		objects = append(objects, &result.PDBs[i])
+	}
+	for i := range result.ServiceAccounts {
+		objects = append(objects, &result.ServiceAccounts[i])
+	}
+	for i := range result.NetworkPolicies {
+		objects = append(objects, &result.NetworkPolicies[i])
 	}
 	return objects
 }

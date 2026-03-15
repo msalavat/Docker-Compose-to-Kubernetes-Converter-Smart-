@@ -5,19 +5,24 @@ import (
 	"sort"
 
 	"github.com/compositor/kompoze/internal/parser"
+	"github.com/compositor/kompoze/internal/wizard"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 )
 
 // ConvertOptions holds configuration for the conversion process.
 type ConvertOptions struct {
-	OutputDir    string
-	Namespace    string
-	AppName      string
-	AddProbes    bool
-	AddResources bool
-	AddSecurity  bool
-	SingleFile   bool
+	OutputDir        string
+	Namespace        string
+	AppName          string
+	AddProbes        bool
+	AddResources     bool
+	AddSecurity      bool
+	SingleFile       bool
+	AddNetworkPolicy bool
 }
 
 // DefaultOptions returns ConvertOptions with production-grade defaults.
@@ -33,10 +38,15 @@ func DefaultOptions() ConvertOptions {
 
 // ConvertResult holds all generated Kubernetes resources.
 type ConvertResult struct {
-	Deployments []appsv1.Deployment
-	Services    []corev1.Service
-	ConfigMaps  []corev1.ConfigMap
-	PVCs        []corev1.PersistentVolumeClaim
+	Deployments     []appsv1.Deployment
+	Services        []corev1.Service
+	ConfigMaps      []corev1.ConfigMap
+	PVCs            []corev1.PersistentVolumeClaim
+	Ingresses       []networkingv1.Ingress
+	HPAs            []autoscalingv2.HorizontalPodAutoscaler
+	PDBs            []policyv1.PodDisruptionBudget
+	ServiceAccounts []corev1.ServiceAccount
+	NetworkPolicies []networkingv1.NetworkPolicy
 }
 
 // Convert transforms a parsed ComposeFile into Kubernetes resources.
@@ -88,6 +98,39 @@ func Convert(compose *parser.ComposeFile, opts ConvertOptions) (*ConvertResult, 
 				result.ConfigMaps = append(result.ConfigMaps, configMap)
 			}
 			_ = secretKeys // will be used for Secret generation later
+		}
+
+		// Always generate ServiceAccount
+		sa := generateServiceAccount(name, opts)
+		result.ServiceAccounts = append(result.ServiceAccounts, sa)
+
+		// Detect service type for smart resource generation
+		svcType := wizard.DetectServiceType(svc.Image)
+
+		// Generate Ingress for services with HTTP ports
+		if ingress := generateIngress(name, &svc, opts); ingress != nil {
+			result.Ingresses = append(result.Ingresses, *ingress)
+		}
+
+		// Generate HPA for non-database services
+		if svcType != wizard.ServiceTypeDatabase {
+			hpa := generateHPA(name, opts)
+			result.HPAs = append(result.HPAs, *hpa)
+		}
+
+		// Generate PDB for services with replicas > 1
+		var replicas int32 = 1
+		if svc.Deploy != nil && svc.Deploy.Replicas != nil {
+			replicas = int32(*svc.Deploy.Replicas)
+		}
+		if pdb := generatePDB(name, replicas, opts); pdb != nil {
+			result.PDBs = append(result.PDBs, *pdb)
+		}
+
+		// Generate NetworkPolicy if enabled
+		if opts.AddNetworkPolicy {
+			np := generateNetworkPolicy(name, &svc, opts)
+			result.NetworkPolicies = append(result.NetworkPolicies, *np)
 		}
 	}
 	_ = warnings // will be reported by CLI
