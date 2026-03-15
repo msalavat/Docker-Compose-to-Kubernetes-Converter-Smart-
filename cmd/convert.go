@@ -5,8 +5,11 @@ import (
 	"os"
 
 	"github.com/compositor/kompoze/internal/converter"
+	"github.com/compositor/kompoze/internal/helm"
+	"github.com/compositor/kompoze/internal/kustomize"
 	"github.com/compositor/kompoze/internal/output"
 	"github.com/compositor/kompoze/internal/parser"
+	"github.com/compositor/kompoze/internal/validator"
 	"github.com/spf13/cobra"
 )
 
@@ -60,7 +63,8 @@ Examples:
   kompoze convert --wizard docker-compose.yml
   kompoze convert --helm -o helm-chart/
   kompoze convert --kustomize -o kustomize/
-  kompoze convert --dry-run docker-compose.yml`,
+  kompoze convert --dry-run docker-compose.yml
+  kompoze convert --validate docker-compose.yml`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		composeFile := "docker-compose.yml"
@@ -82,13 +86,14 @@ Examples:
 
 		// Convert
 		opts := converter.ConvertOptions{
-			OutputDir:    outputDir,
-			Namespace:    namespace,
-			AppName:      appName,
-			AddProbes:    !noProbes,
-			AddResources: !noResources,
-			AddSecurity:  !noSecurity,
-			SingleFile:   singleFile,
+			OutputDir:        outputDir,
+			Namespace:        namespace,
+			AppName:          appName,
+			AddProbes:        !noProbes,
+			AddResources:     !noResources,
+			AddSecurity:      !noSecurity,
+			SingleFile:       singleFile,
+			AddNetworkPolicy: !noNetPolicy,
 		}
 
 		if !quietFlag {
@@ -99,7 +104,78 @@ Examples:
 			return fmt.Errorf("converting: %w", err)
 		}
 
-		// Output
+		// Print per-service summary
+		if !quietFlag && verboseFlag {
+			for _, d := range result.Deployments {
+				resources := []string{"Deployment"}
+				for _, s := range result.Services {
+					if s.Name == d.Name {
+						resources = append(resources, "Service")
+						break
+					}
+				}
+				for _, cm := range result.ConfigMaps {
+					if cm.Name == d.Name+"-config" {
+						resources = append(resources, "ConfigMap")
+						break
+					}
+				}
+				for _, ing := range result.Ingresses {
+					if ing.Name == d.Name {
+						resources = append(resources, "Ingress")
+						break
+					}
+				}
+				for _, hpa := range result.HPAs {
+					if hpa.Name == d.Name {
+						resources = append(resources, "HPA")
+						break
+					}
+				}
+				for _, pdb := range result.PDBs {
+					if pdb.Name == d.Name {
+						resources = append(resources, "PDB")
+						break
+					}
+				}
+				fmt.Printf("  ✓ %s: %s\n", d.Name, joinResources(resources))
+			}
+		}
+
+		// Validation
+		if validateFlag || strictFlag {
+			if !quietFlag {
+				fmt.Print("Validating...")
+			}
+			vErrors := validator.ValidateManifests(result)
+			errCount := len(validator.FilterBySeverity(vErrors, "error"))
+			warnCount := len(validator.FilterBySeverity(vErrors, "warning"))
+
+			if !quietFlag {
+				fmt.Printf(" (%d errors, %d warnings)\n", errCount, warnCount)
+				for _, ve := range vErrors {
+					switch ve.Severity {
+					case "error":
+						fmt.Printf("  ✗ %s: %s\n", ve.Resource, ve.Message)
+					case "warning":
+						fmt.Printf("  ⚠ %s: %s\n", ve.Resource, ve.Message)
+					case "info":
+						if verboseFlag {
+							fmt.Printf("  ℹ %s: %s\n", ve.Resource, ve.Message)
+						}
+					}
+				}
+			}
+
+			if validator.HasErrors(vErrors) {
+				return fmt.Errorf("validation failed with %d errors", errCount)
+			}
+			if strictFlag && validator.HasWarnings(vErrors) {
+				return fmt.Errorf("validation failed with %d warnings (strict mode)", warnCount)
+			}
+		}
+
+		// Dry-run: output to stdout
 		if dryRun {
 			content, err := output.RenderManifests(result)
 			if err != nil {
@@ -109,15 +185,66 @@ Examples:
 			return nil
 		}
 
+		// Kustomize output
+		if kustomizeOut {
+			if !quietFlag {
+				fmt.Println("Generating Kustomize structure...")
+			}
+			kOpts := kustomize.GenerateOptions{
+				OutputDir: outputDir,
+				AppName:   appName,
+				Namespace: namespace,
+			}
+			if err := kustomize.Generate(result, kOpts); err != nil {
+				return fmt.Errorf("generating Kustomize structure: %w", err)
+			}
+			if !quietFlag {
+				fmt.Printf("\nKustomize structure written to %s/\n", outputDir)
+			}
+			return nil
+		}
+
+		// Helm chart output
+		if helmOutput {
+			if !quietFlag {
+				fmt.Println("Generating Helm chart...")
+			}
+			helmOpts := helm.GenerateOptions{
+				OutputDir: outputDir,
+				AppName:   appName,
+				Namespace: namespace,
+			}
+			if err := helm.Generate(compose, result, helmOpts); err != nil {
+				return fmt.Errorf("generating Helm chart: %w", err)
+			}
+			if !quietFlag {
+				fmt.Printf("\nHelm chart written to %s/\n", outputDir)
+			}
+			return nil
+		}
+
+		// Default: write K8s manifests
 		if err := output.WriteManifests(result, outputDir, singleFile); err != nil {
 			return fmt.Errorf("writing manifests: %w", err)
 		}
 
 		if !quietFlag {
-			total := len(result.Deployments) + len(result.Services) + len(result.ConfigMaps) + len(result.PVCs)
+			total := len(result.Deployments) + len(result.Services) + len(result.ConfigMaps) + len(result.PVCs) +
+				len(result.Ingresses) + len(result.HPAs) + len(result.PDBs) + len(result.ServiceAccounts) + len(result.NetworkPolicies)
 			fmt.Printf("\nOutput written to %s/ (%d files)\n", outputDir, total)
 		}
 
 		return nil
 	},
+}
+
+func joinResources(resources []string) string {
+	result := ""
+	for i, r := range resources {
+		if i > 0 {
+			result += ", "
+		}
+		result += r
+	}
+	return result
 }
