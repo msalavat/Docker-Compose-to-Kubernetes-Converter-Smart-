@@ -57,11 +57,22 @@ func Convert(compose *parser.ComposeFile, opts ConvertOptions) (*ConvertResult, 
 	}
 	sort.Strings(names)
 
+	var warnings []string
+
 	for _, name := range names {
 		svc := compose.Services[name]
 
-		// Generate Deployment
+		// Generate volumes (PVCs, pod volumes, mounts)
+		volResult := generateVolumes(name, &svc, compose, opts)
+		result.PVCs = append(result.PVCs, volResult.PVCs...)
+		warnings = append(warnings, volResult.Warnings...)
+
+		// Generate Deployment (with volume mounts)
 		deployment := generateDeployment(name, &svc, opts)
+		if len(volResult.PodVolumes) > 0 {
+			deployment.Spec.Template.Spec.Volumes = volResult.PodVolumes
+			deployment.Spec.Template.Spec.Containers[0].VolumeMounts = volResult.VolumeMounts
+		}
 		result.Deployments = append(result.Deployments, deployment)
 
 		// Generate Service (if ports defined)
@@ -79,6 +90,7 @@ func Convert(compose *parser.ComposeFile, opts ConvertOptions) (*ConvertResult, 
 			_ = secretKeys // will be used for Secret generation later
 		}
 	}
+	_ = warnings // will be reported by CLI
 
 	return result, nil
 }
