@@ -1,0 +1,104 @@
+version: "3.8"
+
+services:
+  gateway:
+    image: nginx:1.25
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - users-api
+      - orders-api
+      - products-api
+    deploy:
+      replicas: 2
+
+  users-api:
+    image: node:20-alpine
+    command: node server.js
+    ports:
+      - "3001:3000"
+    environment:
+      PORT: "3000"
+      DB_HOST: users-db
+      DB_PORT: "5432"
+      DB_PASSWORD: users-secret
+      JWT_SECRET: jwt-secret-key
+    depends_on:
+      - users-db
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  orders-api:
+    image: golang:1.22-alpine
+    command: /app/orders-api
+    ports:
+      - "3002:8080"
+    environment:
+      DB_HOST: orders-db
+      DB_PORT: "5432"
+      DB_PASSWORD: orders-secret
+      REDIS_URL: redis://cache:6379/0
+    depends_on:
+      - orders-db
+      - cache
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  products-api:
+    image: python:3.12-slim
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "3003:8000"
+    environment:
+      DATABASE_URL: postgres://products:products-secret@products-db:5432/productsdb
+      API_KEY: products-api-key
+    depends_on:
+      - products-db
+
+  users-db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: usersdb
+      POSTGRES_USER: users
+      POSTGRES_PASSWORD: users-secret
+    volumes:
+      - users-db-data:/var/lib/postgresql/data
+
+  orders-db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: ordersdb
+      MYSQL_USER: orders
+      MYSQL_PASSWORD: orders-secret
+      MYSQL_ROOT_PASSWORD: root-secret
+    volumes:
+      - orders-db-data:/var/lib/mysql
+
+  products-db:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: products
+      MONGO_INITDB_ROOT_PASSWORD: products-secret
+    volumes:
+      - products-db-data:/data/db
+
+  cache:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - cache-data:/data
+
+volumes:
+  users-db-data:
+  orders-db-data:
+  products-db-data:
+  cache-data:
