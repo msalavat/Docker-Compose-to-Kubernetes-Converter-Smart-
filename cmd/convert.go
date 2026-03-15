@@ -10,6 +10,7 @@ import (
 	"github.com/compositor/kompoze/internal/output"
 	"github.com/compositor/kompoze/internal/parser"
 	"github.com/compositor/kompoze/internal/validator"
+	"github.com/compositor/kompoze/internal/wizard"
 	"github.com/spf13/cobra"
 )
 
@@ -82,6 +83,22 @@ Examples:
 		}
 		if !quietFlag {
 			fmt.Printf(" ✓ (%d services found)\n", len(compose.Services))
+		}
+
+		// Wizard mode
+		if wizardMode {
+			wizCfg, wizErr := wizard.Run(compose)
+			if wizErr != nil {
+				return fmt.Errorf("wizard: %w", wizErr)
+			}
+			// Apply wizard choices
+			namespace = wizCfg.Namespace
+			switch wizCfg.OutputFormat {
+			case "helm":
+				helmOutput = true
+			case "kustomize":
+				kustomizeOut = true
+			}
 		}
 
 		// Convert

@@ -180,7 +180,11 @@ func TestConvert_SmartProbesTCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	container := result.Deployments[0].Spec.Template.Spec.Containers[0]
+	// postgres is now a StatefulSet
+	if len(result.StatefulSets) != 1 {
+		t.Fatalf("expected 1 statefulset, got %d", len(result.StatefulSets))
+	}
+	container := result.StatefulSets[0].Spec.Template.Spec.Containers[0]
 	if container.LivenessProbe == nil || container.LivenessProbe.TCPSocket == nil {
 		t.Fatal("expected TCP liveness probe for non-HTTP port")
 	}
@@ -391,13 +395,20 @@ func TestConvert_FullComposeFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(result.Deployments) != 2 {
-		t.Errorf("expected 2 deployments, got %d", len(result.Deployments))
+	// api -> Deployment, db (postgres) -> StatefulSet
+	if len(result.Deployments) != 1 {
+		t.Errorf("expected 1 deployment (api), got %d", len(result.Deployments))
+	}
+	if len(result.StatefulSets) != 1 {
+		t.Errorf("expected 1 statefulset (db), got %d", len(result.StatefulSets))
 	}
 	if len(result.Services) != 2 {
 		t.Errorf("expected 2 services, got %d", len(result.Services))
 	}
 	if len(result.ConfigMaps) != 2 {
 		t.Errorf("expected 2 configmaps, got %d", len(result.ConfigMaps))
+	}
+	if len(result.Secrets) != 2 {
+		t.Errorf("expected 2 secrets, got %d", len(result.Secrets))
 	}
 }

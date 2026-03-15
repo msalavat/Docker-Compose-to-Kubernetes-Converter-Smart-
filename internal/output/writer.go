@@ -60,6 +60,11 @@ func writeMultipleFiles(result *converter.ConvertResult, outputDir string) error
 			return err
 		}
 	}
+	for _, ss := range result.StatefulSets {
+		if err := writeResource(outputDir, ss.Name+"-statefulset.yaml", &ss); err != nil {
+			return err
+		}
+	}
 	for _, s := range result.Services {
 		if err := writeResource(outputDir, s.Name+"-service.yaml", &s); err != nil {
 			return err
@@ -67,6 +72,11 @@ func writeMultipleFiles(result *converter.ConvertResult, outputDir string) error
 	}
 	for _, cm := range result.ConfigMaps {
 		if err := writeResource(outputDir, cm.Name+".yaml", &cm); err != nil {
+			return err
+		}
+	}
+	for _, sec := range result.Secrets {
+		if err := writeResource(outputDir, sec.Name+".yaml", &sec); err != nil {
 			return err
 		}
 	}
@@ -127,11 +137,17 @@ func collectObjects(result *converter.ConvertResult) []runtime.Object {
 	for i := range result.Deployments {
 		objects = append(objects, &result.Deployments[i])
 	}
+	for i := range result.StatefulSets {
+		objects = append(objects, &result.StatefulSets[i])
+	}
 	for i := range result.Services {
 		objects = append(objects, &result.Services[i])
 	}
 	for i := range result.ConfigMaps {
 		objects = append(objects, &result.ConfigMaps[i])
+	}
+	for i := range result.Secrets {
+		objects = append(objects, &result.Secrets[i])
 	}
 	for i := range result.PVCs {
 		objects = append(objects, &result.PVCs[i])
