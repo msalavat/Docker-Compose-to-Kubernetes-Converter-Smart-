@@ -2,27 +2,31 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/compositor/kompoze/internal/converter"
+	"github.com/compositor/kompoze/internal/output"
+	"github.com/compositor/kompoze/internal/parser"
 	"github.com/spf13/cobra"
 )
 
 var (
-	outputDir      string
-	namespace      string
-	appName        string
-	helmOutput     bool
-	kustomizeOut   bool
-	wizardMode     bool
-	validateFlag   bool
-	strictFlag     bool
-	noProbes       bool
-	noResources    bool
-	noSecurity     bool
-	noNetPolicy    bool
-	singleFile     bool
-	quietFlag      bool
-	verboseFlag    bool
-	dryRun         bool
+	outputDir    string
+	namespace    string
+	appName      string
+	helmOutput   bool
+	kustomizeOut bool
+	wizardMode   bool
+	validateFlag bool
+	strictFlag   bool
+	noProbes     bool
+	noResources  bool
+	noSecurity   bool
+	noNetPolicy  bool
+	singleFile   bool
+	quietFlag    bool
+	verboseFlag  bool
+	dryRun       bool
 )
 
 func init() {
@@ -64,12 +68,56 @@ Examples:
 			composeFile = args[0]
 		}
 
+		// Parse
 		if !quietFlag {
-			fmt.Printf("Converting %s → %s\n", composeFile, outputDir)
+			fmt.Printf("Parsing %s...", composeFile)
+		}
+		compose, err := parser.ParseComposeFile(composeFile)
+		if err != nil {
+			return fmt.Errorf("parsing compose file: %w", err)
+		}
+		if !quietFlag {
+			fmt.Printf(" ✓ (%d services found)\n", len(compose.Services))
 		}
 
-		// TODO: implement conversion pipeline
-		fmt.Println("Conversion not yet implemented. Coming soon!")
+		// Convert
+		opts := converter.ConvertOptions{
+			OutputDir:    outputDir,
+			Namespace:    namespace,
+			AppName:      appName,
+			AddProbes:    !noProbes,
+			AddResources: !noResources,
+			AddSecurity:  !noSecurity,
+			SingleFile:   singleFile,
+		}
+
+		if !quietFlag {
+			fmt.Println("Generating manifests...")
+		}
+		result, err := converter.Convert(compose, opts)
+		if err != nil {
+			return fmt.Errorf("converting: %w", err)
+		}
+
+		// Output
+		if dryRun {
+			content, err := output.RenderManifests(result)
+			if err != nil {
+				return fmt.Errorf("rendering manifests: %w", err)
+			}
+			fmt.Fprint(os.Stdout, content)
+			return nil
+		}
+
+		if err := output.WriteManifests(result, outputDir, singleFile); err != nil {
+			return fmt.Errorf("writing manifests: %w", err)
+		}
+
+		if !quietFlag {
+			total := len(result.Deployments) + len(result.Services) + len(result.ConfigMaps) + len(result.PVCs)
+			fmt.Printf("\nOutput written to %s/ (%d files)\n", outputDir, total)
+		}
+
 		return nil
 	},
 }

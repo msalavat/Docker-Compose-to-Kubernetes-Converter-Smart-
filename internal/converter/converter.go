@@ -2,6 +2,7 @@ package converter
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/compositor/kompoze/internal/parser"
 	appsv1 "k8s.io/api/apps/v1"
@@ -16,6 +17,7 @@ type ConvertOptions struct {
 	AddProbes    bool
 	AddResources bool
 	AddSecurity  bool
+	SingleFile   bool
 }
 
 // DefaultOptions returns ConvertOptions with production-grade defaults.
@@ -42,6 +44,60 @@ func Convert(compose *parser.ComposeFile, opts ConvertOptions) (*ConvertResult, 
 	if compose == nil {
 		return nil, fmt.Errorf("compose file is nil")
 	}
-	// TODO: implement conversion pipeline
-	return &ConvertResult{}, nil
+	if len(compose.Services) == 0 {
+		return nil, fmt.Errorf("no services to convert")
+	}
+
+	result := &ConvertResult{}
+
+	// Sort service names for deterministic output
+	names := make([]string, 0, len(compose.Services))
+	for name := range compose.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		svc := compose.Services[name]
+
+		// Generate Deployment
+		deployment := generateDeployment(name, &svc, opts)
+		result.Deployments = append(result.Deployments, deployment)
+
+		// Generate Service (if ports defined)
+		if len(svc.Ports) > 0 {
+			k8sSvc := generateService(name, &svc, opts)
+			result.Services = append(result.Services, k8sSvc)
+		}
+
+		// Generate ConfigMap (if environment defined with non-secret vars)
+		if len(svc.Environment) > 0 {
+			configMap, secretKeys := generateConfigMap(name, &svc, opts)
+			if len(configMap.Data) > 0 {
+				result.ConfigMaps = append(result.ConfigMaps, configMap)
+			}
+			_ = secretKeys // will be used for Secret generation later
+		}
+	}
+
+	return result, nil
+}
+
+// standardLabels returns the standard set of labels for a resource.
+func standardLabels(serviceName string, appName string) map[string]string {
+	labels := map[string]string{
+		"app.kubernetes.io/name":       serviceName,
+		"app.kubernetes.io/managed-by": "kompoze",
+	}
+	if appName != "" {
+		labels["app.kubernetes.io/part-of"] = appName
+	}
+	return labels
+}
+
+// selectorLabels returns labels used for pod selection.
+func selectorLabels(serviceName string) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name": serviceName,
+	}
 }
