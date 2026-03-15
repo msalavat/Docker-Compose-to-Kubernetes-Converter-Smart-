@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/compositor/kompoze/internal/parser"
+	"github.com/compositor/kompoze/internal/wizard"
 )
 
 func intPtr(i int) *int { return &i }
@@ -410,5 +411,110 @@ func TestConvert_FullComposeFile(t *testing.T) {
 	}
 	if len(result.Secrets) != 2 {
 		t.Errorf("expected 2 secrets, got %d", len(result.Secrets))
+	}
+}
+
+func TestConvert_WizardOverrides(t *testing.T) {
+	compose := &parser.ComposeFile{
+		Services: map[string]parser.ServiceConfig{
+			"web": {
+				Image: "nginx:1.25",
+				Ports: []parser.PortConfig{{ContainerPort: 80, Protocol: "tcp"}},
+			},
+		},
+	}
+
+	opts := DefaultOptions()
+	opts.WizardOverrides = map[string]wizard.ServiceWizardConfig{
+		"web": {
+			Kind:         "Deployment",
+			Replicas:     5,
+			AddIngress:   true,
+			IngressHost:  "web.mysite.com",
+			AddTLS:       true,
+			AddHPA:       true,
+			HPAMin:       3,
+			HPAMax:       15,
+			HPATargetCPU: 80,
+			AddPDB:       true,
+		},
+	}
+
+	result, err := Convert(compose, opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Replicas should be overridden to 5
+	if len(result.Deployments) != 1 {
+		t.Fatalf("expected 1 deployment, got %d", len(result.Deployments))
+	}
+	if *result.Deployments[0].Spec.Replicas != 5 {
+		t.Errorf("expected 5 replicas from wizard, got %d", *result.Deployments[0].Spec.Replicas)
+	}
+
+	// Ingress with custom host
+	if len(result.Ingresses) != 1 {
+		t.Fatalf("expected 1 ingress, got %d", len(result.Ingresses))
+	}
+	if result.Ingresses[0].Spec.Rules[0].Host != "web.mysite.com" {
+		t.Errorf("expected host web.mysite.com, got %s", result.Ingresses[0].Spec.Rules[0].Host)
+	}
+	if len(result.Ingresses[0].Spec.TLS) == 0 {
+		t.Error("expected TLS to be enabled")
+	}
+
+	// HPA with custom settings
+	if len(result.HPAs) != 1 {
+		t.Fatalf("expected 1 HPA, got %d", len(result.HPAs))
+	}
+	if *result.HPAs[0].Spec.MinReplicas != 3 {
+		t.Errorf("expected HPA min 3, got %d", *result.HPAs[0].Spec.MinReplicas)
+	}
+	if result.HPAs[0].Spec.MaxReplicas != 15 {
+		t.Errorf("expected HPA max 15, got %d", result.HPAs[0].Spec.MaxReplicas)
+	}
+
+	// PDB should be created (wizard said yes, even though replicas > 1 would have done it anyway)
+	if len(result.PDBs) != 1 {
+		t.Errorf("expected 1 PDB from wizard, got %d", len(result.PDBs))
+	}
+}
+
+func TestConvert_WizardNoIngress(t *testing.T) {
+	compose := &parser.ComposeFile{
+		Services: map[string]parser.ServiceConfig{
+			"web": {
+				Image: "nginx:1.25",
+				Ports: []parser.PortConfig{{ContainerPort: 80, Protocol: "tcp"}},
+			},
+		},
+	}
+
+	opts := DefaultOptions()
+	opts.WizardOverrides = map[string]wizard.ServiceWizardConfig{
+		"web": {
+			Kind:       "Deployment",
+			Replicas:   1,
+			AddIngress: false, // Wizard says no ingress
+			AddHPA:     false, // Wizard says no HPA
+			AddPDB:     false, // Wizard says no PDB
+		},
+	}
+
+	result, err := Convert(compose, opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Wizard said no ingress, even though port 80 would normally auto-create one
+	if len(result.Ingresses) != 0 {
+		t.Errorf("expected 0 ingresses (wizard disabled), got %d", len(result.Ingresses))
+	}
+	if len(result.HPAs) != 0 {
+		t.Errorf("expected 0 HPAs (wizard disabled), got %d", len(result.HPAs))
+	}
+	if len(result.PDBs) != 0 {
+		t.Errorf("expected 0 PDBs (wizard disabled), got %d", len(result.PDBs))
 	}
 }

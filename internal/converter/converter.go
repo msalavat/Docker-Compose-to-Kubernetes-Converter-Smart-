@@ -23,6 +23,9 @@ type ConvertOptions struct {
 	AddSecurity      bool
 	SingleFile       bool
 	AddNetworkPolicy bool
+	// WizardOverrides holds per-service overrides from the interactive wizard.
+	// If nil, smart defaults from service type detection are used.
+	WizardOverrides map[string]wizard.ServiceWizardConfig
 }
 
 // DefaultOptions returns ConvertOptions with production-grade defaults.
@@ -79,9 +82,29 @@ func Convert(compose *parser.ComposeFile, opts ConvertOptions) (*ConvertResult, 
 		svcType := wizard.DetectServiceType(svc.Image)
 		useStatefulSet := wizard.ShouldSuggestStatefulSet(svcType)
 
+		// Check for wizard overrides
+		var wizCfg *wizard.ServiceWizardConfig
+		if opts.WizardOverrides != nil {
+			if wc, ok := opts.WizardOverrides[name]; ok {
+				wizCfg = &wc
+				// Wizard can override the workload kind
+				useStatefulSet = (wc.Kind == "StatefulSet")
+			}
+		}
+
+		// Determine replicas: wizard override > compose deploy > default
+		var replicas int32 = 1
+		if wizCfg != nil && wizCfg.Replicas > 0 {
+			replicas = wizCfg.Replicas
+		} else if svc.Deploy != nil && svc.Deploy.Replicas != nil {
+			replicas = int32(*svc.Deploy.Replicas)
+		}
+
 		if useStatefulSet {
 			// StatefulSet for databases — includes VolumeClaimTemplates
 			ss := generateStatefulSet(name, &svc, opts)
+			// Apply wizard replicas
+			ss.Spec.Replicas = &replicas
 			result.StatefulSets = append(result.StatefulSets, ss)
 
 			// Headless Service required for StatefulSet
@@ -97,6 +120,8 @@ func Convert(compose *parser.ComposeFile, opts ConvertOptions) (*ConvertResult, 
 			warnings = append(warnings, volResult.Warnings...)
 
 			deployment := generateDeployment(name, &svc, opts)
+			// Apply wizard replicas
+			deployment.Spec.Replicas = &replicas
 			if len(volResult.PodVolumes) > 0 {
 				deployment.Spec.Template.Spec.Volumes = volResult.PodVolumes
 				deployment.Spec.Template.Spec.Containers[0].VolumeMounts = volResult.VolumeMounts
@@ -125,24 +150,63 @@ func Convert(compose *parser.ComposeFile, opts ConvertOptions) (*ConvertResult, 
 		sa := generateServiceAccount(name, opts)
 		result.ServiceAccounts = append(result.ServiceAccounts, sa)
 
-		// Generate Ingress for services with HTTP ports
-		if ingress := generateIngress(name, &svc, opts); ingress != nil {
-			result.Ingresses = append(result.Ingresses, *ingress)
+		// Generate Ingress: wizard override or auto-detect HTTP ports
+		addIngress := false
+		ingressHost := ""
+		addTLS := true
+		if wizCfg != nil {
+			addIngress = wizCfg.AddIngress
+			ingressHost = wizCfg.IngressHost
+			addTLS = wizCfg.AddTLS
+		}
+		if addIngress && ingressHost != "" {
+			// Wizard-specified Ingress with custom host
+			ingress := generateIngressWithHost(name, &svc, opts, ingressHost, addTLS)
+			if ingress != nil {
+				result.Ingresses = append(result.Ingresses, *ingress)
+			}
+		} else if wizCfg == nil {
+			// No wizard: auto-detect from HTTP ports
+			if ingress := generateIngress(name, &svc, opts); ingress != nil {
+				result.Ingresses = append(result.Ingresses, *ingress)
+			}
 		}
 
-		// Generate HPA for non-database/cache services only
-		if svcType != wizard.ServiceTypeDatabase && svcType != wizard.ServiceTypeCache {
+		// Generate HPA: wizard override or auto-detect
+		addHPA := false
+		if wizCfg != nil {
+			addHPA = wizCfg.AddHPA
+		} else {
+			addHPA = (svcType != wizard.ServiceTypeDatabase && svcType != wizard.ServiceTypeCache)
+		}
+		if addHPA {
 			hpa := generateHPA(name, opts)
+			if wizCfg != nil {
+				// Apply wizard HPA settings
+				if wizCfg.HPAMin > 0 {
+					hpa.Spec.MinReplicas = &wizCfg.HPAMin
+				}
+				if wizCfg.HPAMax > 0 {
+					hpa.Spec.MaxReplicas = wizCfg.HPAMax
+				}
+				if wizCfg.HPATargetCPU > 0 && len(hpa.Spec.Metrics) > 0 && hpa.Spec.Metrics[0].Resource != nil {
+					hpa.Spec.Metrics[0].Resource.Target.AverageUtilization = &wizCfg.HPATargetCPU
+				}
+			}
 			result.HPAs = append(result.HPAs, *hpa)
 		}
 
-		// Generate PDB for services with replicas > 1
-		var replicas int32 = 1
-		if svc.Deploy != nil && svc.Deploy.Replicas != nil {
-			replicas = int32(*svc.Deploy.Replicas)
+		// Generate PDB: wizard override or auto (replicas > 1)
+		addPDB := false
+		if wizCfg != nil {
+			addPDB = wizCfg.AddPDB
+		} else {
+			addPDB = (replicas > 1)
 		}
-		if pdb := generatePDB(name, replicas, opts); pdb != nil {
-			result.PDBs = append(result.PDBs, *pdb)
+		if addPDB {
+			if pdb := generatePDB(name, replicas, opts); pdb != nil {
+				result.PDBs = append(result.PDBs, *pdb)
+			}
 		}
 
 		// Generate NetworkPolicy if enabled

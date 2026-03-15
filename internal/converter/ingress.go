@@ -77,3 +77,75 @@ func generateIngress(name string, svc *parser.ServiceConfig, opts ConvertOptions
 
 	return ingress
 }
+
+// generateIngressWithHost creates an Ingress with a custom hostname (from wizard).
+// Uses all service ports (not just HTTP). TLS is optional.
+func generateIngressWithHost(name string, svc *parser.ServiceConfig, opts ConvertOptions, host string, addTLS bool) *networkingv1.Ingress {
+	if len(svc.Ports) == 0 {
+		return nil
+	}
+
+	labels := standardLabels(name, opts.AppName)
+	ingressClassName := "nginx"
+	pathType := networkingv1.PathTypePrefix
+
+	// Use first port as the backend
+	backendPort := int32(svc.Ports[0].ContainerPort)
+
+	paths := []networkingv1.HTTPIngressPath{
+		{
+			Path:     "/",
+			PathType: &pathType,
+			Backend: networkingv1.IngressBackend{
+				Service: &networkingv1.IngressServiceBackend{
+					Name: name,
+					Port: networkingv1.ServiceBackendPort{
+						Number: backendPort,
+					},
+				},
+			},
+		},
+	}
+
+	annotations := map[string]string{}
+	if addTLS {
+		annotations["cert-manager.io/cluster-issuer"] = "letsencrypt-prod"
+	}
+
+	ingress := &networkingv1.Ingress{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "networking.k8s.io/v1",
+			Kind:       "Ingress",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   opts.Namespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: networkingv1.IngressSpec{
+			IngressClassName: &ingressClassName,
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: host,
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: paths,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if addTLS {
+		ingress.Spec.TLS = []networkingv1.IngressTLS{
+			{
+				Hosts:      []string{host},
+				SecretName: name + "-tls",
+			},
+		}
+	}
+
+	return ingress
+}

@@ -87,6 +87,7 @@ Examples:
 		}
 
 		// Wizard mode
+		var wizardServices map[string]wizard.ServiceWizardConfig
 		if wizardMode {
 			wizCfg, wizErr := wizard.Run(compose)
 			if wizErr != nil {
@@ -94,6 +95,7 @@ Examples:
 			}
 			// Apply wizard choices
 			namespace = wizCfg.Namespace
+			wizardServices = wizCfg.Services
 			switch wizCfg.OutputFormat {
 			case "helm":
 				helmOutput = true
@@ -112,6 +114,7 @@ Examples:
 			AddSecurity:      !noSecurity,
 			SingleFile:       singleFile,
 			AddNetworkPolicy: !noNetPolicy,
+			WizardOverrides:  wizardServices,
 		}
 
 		if !quietFlag {
