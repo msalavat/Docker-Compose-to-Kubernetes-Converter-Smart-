@@ -31,8 +31,9 @@ func generateDeployment(name string, svc *parser.ServiceConfig, opts ConvertOpti
 	}
 
 	podSpec := corev1.PodSpec{
-		Containers:     []corev1.Container{container},
-		InitContainers: initContainers,
+		Containers:         []corev1.Container{container},
+		InitContainers:     initContainers,
+		ServiceAccountName: name,
 	}
 
 	// Security context at pod level
@@ -110,9 +111,28 @@ func buildContainer(name string, svc *parser.ServiceConfig, opts ConvertOptions)
 
 	// Environment - from ConfigMap ref + Secret refs
 	if len(svc.Environment) > 0 {
-		for k, v := range svc.Environment {
+		hasNonSensitive := false
+		for k := range svc.Environment {
+			if !isSensitiveKey(k) {
+				hasNonSensitive = true
+				break
+			}
+		}
+
+		// Add single ConfigMapRef for all non-sensitive vars
+		if hasNonSensitive {
+			container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
+				ConfigMapRef: &corev1.ConfigMapEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: name + "-config",
+					},
+				},
+			})
+		}
+
+		// Add individual SecretKeyRef for each sensitive var
+		for k := range svc.Environment {
 			if isSensitiveKey(k) {
-				// Secret reference (placeholder)
 				container.Env = append(container.Env, corev1.EnvVar{
 					Name: k,
 					ValueFrom: &corev1.EnvVarSource{
@@ -124,16 +144,6 @@ func buildContainer(name string, svc *parser.ServiceConfig, opts ConvertOptions)
 						},
 					},
 				})
-			} else {
-				container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
-					ConfigMapRef: &corev1.ConfigMapEnvSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: name + "-config",
-						},
-					},
-				})
-				_ = v
-				break // Only need one EnvFrom for the ConfigMap
 			}
 		}
 	}
@@ -362,14 +372,41 @@ func buildInitContainers(deps parser.DependsOn) []corev1.Container {
 	var initContainers []corev1.Container
 
 	for depName := range deps {
+		port := guessServicePort(depName)
+
 		initContainers = append(initContainers, corev1.Container{
 			Name:    "wait-for-" + depName,
 			Image:   "busybox:1.36",
-			Command: []string{"sh", "-c", fmt.Sprintf("until nc -z %s 1; do echo waiting for %s; sleep 2; done", depName, depName)},
+			Command: []string{"sh", "-c", fmt.Sprintf("until nc -z %s %d; do echo waiting for %s; sleep 2; done", depName, port, depName)},
 		})
 	}
 
 	return initContainers
+}
+
+// guessServicePort returns a reasonable default port for a service based on its name.
+func guessServicePort(name string) int {
+	lower := strings.ToLower(name)
+	portMap := map[string]int{
+		"postgres": 5432, "postgresql": 5432, "pg": 5432,
+		"mysql": 3306, "mariadb": 3306,
+		"mongo": 27017, "mongodb": 27017,
+		"redis": 6379, "valkey": 6379,
+		"memcached": 11211,
+		"elasticsearch": 9200, "opensearch": 9200,
+		"rabbitmq": 5672, "amqp": 5672,
+		"kafka": 9092, "zookeeper": 2181,
+		"cassandra": 9042, "couchdb": 5984,
+		"neo4j": 7687, "influxdb": 8086,
+		"nginx": 80, "httpd": 80, "apache": 80,
+	}
+	for pattern, port := range portMap {
+		if strings.Contains(lower, pattern) {
+			return port
+		}
+	}
+	// Default: assume HTTP service
+	return 80
 }
 
 // --- Helpers ---
@@ -381,12 +418,23 @@ func isHTTPPort(port uint32) bool {
 
 func isSensitiveKey(key string) bool {
 	upper := strings.ToUpper(key)
-	sensitivePatterns := []string{"PASSWORD", "SECRET", "TOKEN", "KEY", "CREDENTIALS", "API_KEY", "PRIVATE"}
-	for _, pattern := range sensitivePatterns {
+
+	// Exact substring patterns (always sensitive when contained anywhere)
+	containsPatterns := []string{"PASSWORD", "SECRET", "TOKEN", "CREDENTIALS", "PRIVATE_KEY", "API_KEY"}
+	for _, pattern := range containsPatterns {
 		if strings.Contains(upper, pattern) {
 			return true
 		}
 	}
+
+	// Suffix patterns (sensitive only at the end, e.g. DB_KEY but not KEYBOARD)
+	suffixPatterns := []string{"_KEY", "_CERT", "_PEM"}
+	for _, suffix := range suffixPatterns {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+
 	return false
 }
 

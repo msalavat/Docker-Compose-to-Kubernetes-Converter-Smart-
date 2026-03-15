@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/compositor/kompoze/internal/converter"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ValidationError represents a single validation issue.
@@ -20,9 +22,89 @@ func ValidateManifests(result *converter.ConvertResult) []ValidationError {
 	var errors []ValidationError
 
 	errors = append(errors, validateDeployments(result)...)
+	errors = append(errors, validateStatefulSets(result)...)
 	errors = append(errors, validateServices(result)...)
 	errors = append(errors, validateIngresses(result)...)
 	errors = append(errors, validatePVCs(result)...)
+
+	return errors
+}
+
+// validateWorkloadContainers validates common container-level issues for any workload.
+func validateWorkloadContainers(resource string, kind string, containers []corev1.Container, selector *metav1.LabelSelector) []ValidationError {
+	var errors []ValidationError
+
+	if len(containers) == 0 {
+		errors = append(errors, ValidationError{
+			Resource: resource,
+			Field:    "spec.template.spec.containers",
+			Severity: "error",
+			Message:  fmt.Sprintf("%s has no containers", kind),
+		})
+		return errors
+	}
+
+	container := containers[0]
+
+	// Check image tag
+	if container.Image != "" {
+		if strings.HasSuffix(container.Image, ":latest") || !strings.Contains(container.Image, ":") {
+			errors = append(errors, ValidationError{
+				Resource: resource,
+				Field:    "spec.containers[0].image",
+				Severity: "warning",
+				Message:  fmt.Sprintf("Image '%s' uses 'latest' tag or has no tag; pin to a specific version", container.Image),
+			})
+		}
+	}
+
+	// Check resource limits
+	if container.Resources.Limits == nil && container.Resources.Requests == nil {
+		errors = append(errors, ValidationError{
+			Resource: resource,
+			Field:    "spec.containers[0].resources",
+			Severity: "warning",
+			Message:  "No resource limits or requests specified",
+		})
+	}
+
+	// Check probes
+	if container.LivenessProbe == nil {
+		errors = append(errors, ValidationError{
+			Resource: resource,
+			Field:    "spec.containers[0].livenessProbe",
+			Severity: "warning",
+			Message:  "No liveness probe configured",
+		})
+	}
+	if container.ReadinessProbe == nil {
+		errors = append(errors, ValidationError{
+			Resource: resource,
+			Field:    "spec.containers[0].readinessProbe",
+			Severity: "warning",
+			Message:  "No readiness probe configured",
+		})
+	}
+
+	// Check security context
+	if container.SecurityContext == nil {
+		errors = append(errors, ValidationError{
+			Resource: resource,
+			Field:    "spec.containers[0].securityContext",
+			Severity: "info",
+			Message:  "No container security context set",
+		})
+	}
+
+	// Check labels
+	if selector == nil || len(selector.MatchLabels) == 0 {
+		errors = append(errors, ValidationError{
+			Resource: resource,
+			Field:    "spec.selector.matchLabels",
+			Severity: "error",
+			Message:  fmt.Sprintf("%s has no selector labels", kind),
+		})
+	}
 
 	return errors
 }
@@ -33,7 +115,6 @@ func validateDeployments(result *converter.ConvertResult) []ValidationError {
 	for _, d := range result.Deployments {
 		resource := fmt.Sprintf("deployment/%s", d.Name)
 
-		// Check required fields
 		if d.Name == "" {
 			errors = append(errors, ValidationError{
 				Resource: resource,
@@ -43,77 +124,39 @@ func validateDeployments(result *converter.ConvertResult) []ValidationError {
 			})
 		}
 
-		if len(d.Spec.Template.Spec.Containers) == 0 {
+		errors = append(errors, validateWorkloadContainers(resource, "Deployment",
+			d.Spec.Template.Spec.Containers, d.Spec.Selector)...)
+	}
+
+	return errors
+}
+
+func validateStatefulSets(result *converter.ConvertResult) []ValidationError {
+	var errors []ValidationError
+
+	for _, ss := range result.StatefulSets {
+		resource := fmt.Sprintf("statefulset/%s", ss.Name)
+
+		if ss.Name == "" {
 			errors = append(errors, ValidationError{
 				Resource: resource,
-				Field:    "spec.template.spec.containers",
+				Field:    "metadata.name",
 				Severity: "error",
-				Message:  "Deployment has no containers",
-			})
-			continue
-		}
-
-		container := d.Spec.Template.Spec.Containers[0]
-
-		// Check image tag
-		if container.Image != "" {
-			if strings.HasSuffix(container.Image, ":latest") || !strings.Contains(container.Image, ":") {
-				errors = append(errors, ValidationError{
-					Resource: resource,
-					Field:    "spec.containers[0].image",
-					Severity: "warning",
-					Message:  fmt.Sprintf("Image '%s' uses 'latest' tag or has no tag; pin to a specific version", container.Image),
-				})
-			}
-		}
-
-		// Check resource limits
-		if container.Resources.Limits == nil && container.Resources.Requests == nil {
-			errors = append(errors, ValidationError{
-				Resource: resource,
-				Field:    "spec.containers[0].resources",
-				Severity: "warning",
-				Message:  "No resource limits or requests specified",
+				Message:  "StatefulSet name is empty",
 			})
 		}
 
-		// Check probes
-		if container.LivenessProbe == nil {
+		if ss.Spec.ServiceName == "" {
 			errors = append(errors, ValidationError{
 				Resource: resource,
-				Field:    "spec.containers[0].livenessProbe",
-				Severity: "warning",
-				Message:  "No liveness probe configured",
-			})
-		}
-		if container.ReadinessProbe == nil {
-			errors = append(errors, ValidationError{
-				Resource: resource,
-				Field:    "spec.containers[0].readinessProbe",
-				Severity: "warning",
-				Message:  "No readiness probe configured",
-			})
-		}
-
-		// Check security context
-		if container.SecurityContext == nil {
-			errors = append(errors, ValidationError{
-				Resource: resource,
-				Field:    "spec.containers[0].securityContext",
-				Severity: "info",
-				Message:  "No container security context set",
-			})
-		}
-
-		// Check labels
-		if d.Spec.Selector == nil || len(d.Spec.Selector.MatchLabels) == 0 {
-			errors = append(errors, ValidationError{
-				Resource: resource,
-				Field:    "spec.selector.matchLabels",
+				Field:    "spec.serviceName",
 				Severity: "error",
-				Message:  "Deployment has no selector labels",
+				Message:  "StatefulSet has no serviceName (headless Service required)",
 			})
 		}
+
+		errors = append(errors, validateWorkloadContainers(resource, "StatefulSet",
+			ss.Spec.Template.Spec.Containers, ss.Spec.Selector)...)
 	}
 
 	return errors

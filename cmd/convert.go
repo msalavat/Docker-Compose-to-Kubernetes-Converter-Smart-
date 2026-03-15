@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/compositor/kompoze/internal/converter"
 	"github.com/compositor/kompoze/internal/helm"
@@ -123,39 +124,52 @@ Examples:
 
 		// Print per-service summary
 		if !quietFlag && verboseFlag {
-			for _, d := range result.Deployments {
-				resources := []string{"Deployment"}
+			printServiceSummary := func(name string, kind string) {
+				resources := []string{kind}
 				for _, s := range result.Services {
-					if s.Name == d.Name {
+					if s.Name == name {
 						resources = append(resources, "Service")
 						break
 					}
 				}
 				for _, cm := range result.ConfigMaps {
-					if cm.Name == d.Name+"-config" {
+					if cm.Name == name+"-config" {
 						resources = append(resources, "ConfigMap")
 						break
 					}
 				}
+				for _, sec := range result.Secrets {
+					if sec.Name == name+"-secret" {
+						resources = append(resources, "Secret")
+						break
+					}
+				}
 				for _, ing := range result.Ingresses {
-					if ing.Name == d.Name {
+					if ing.Name == name {
 						resources = append(resources, "Ingress")
 						break
 					}
 				}
 				for _, hpa := range result.HPAs {
-					if hpa.Name == d.Name {
+					if hpa.Name == name {
 						resources = append(resources, "HPA")
 						break
 					}
 				}
 				for _, pdb := range result.PDBs {
-					if pdb.Name == d.Name {
+					if pdb.Name == name {
 						resources = append(resources, "PDB")
 						break
 					}
 				}
-				fmt.Printf("  ✓ %s: %s\n", d.Name, joinResources(resources))
+				fmt.Printf("  ✓ %s: %s\n", name, strings.Join(resources, ", "))
+			}
+
+			for _, d := range result.Deployments {
+				printServiceSummary(d.Name, "Deployment")
+			}
+			for _, ss := range result.StatefulSets {
+				printServiceSummary(ss.Name, "StatefulSet")
 			}
 		}
 
@@ -246,8 +260,10 @@ Examples:
 		}
 
 		if !quietFlag {
-			total := len(result.Deployments) + len(result.Services) + len(result.ConfigMaps) + len(result.PVCs) +
-				len(result.Ingresses) + len(result.HPAs) + len(result.PDBs) + len(result.ServiceAccounts) + len(result.NetworkPolicies)
+			total := len(result.Deployments) + len(result.StatefulSets) + len(result.Services) +
+				len(result.ConfigMaps) + len(result.Secrets) + len(result.PVCs) +
+				len(result.Ingresses) + len(result.HPAs) + len(result.PDBs) +
+				len(result.ServiceAccounts) + len(result.NetworkPolicies)
 			fmt.Printf("\nOutput written to %s/ (%d files)\n", outputDir, total)
 		}
 
@@ -255,13 +271,3 @@ Examples:
 	},
 }
 
-func joinResources(resources []string) string {
-	result := ""
-	for i, r := range resources {
-		if i > 0 {
-			result += ", "
-		}
-		result += r
-	}
-	return result
-}

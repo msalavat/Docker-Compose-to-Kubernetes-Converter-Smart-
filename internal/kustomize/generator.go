@@ -75,6 +75,16 @@ func writeBaseResources(baseDir string, result *converter.ConvertResult) ([]stri
 		resources = append(resources, filename)
 	}
 
+	for i := range result.StatefulSets {
+		ss := &result.StatefulSets[i]
+		ss.Namespace = ""
+		filename := ss.Name + "-statefulset.yaml"
+		if err := writeK8sResource(baseDir, filename, ss); err != nil {
+			return nil, err
+		}
+		resources = append(resources, filename)
+	}
+
 	for i := range result.Services {
 		s := &result.Services[i]
 		s.Namespace = ""
@@ -90,6 +100,16 @@ func writeBaseResources(baseDir string, result *converter.ConvertResult) ([]stri
 		cm.Namespace = ""
 		filename := cm.Name + ".yaml"
 		if err := writeK8sResource(baseDir, filename, cm); err != nil {
+			return nil, err
+		}
+		resources = append(resources, filename)
+	}
+
+	for i := range result.Secrets {
+		sec := &result.Secrets[i]
+		sec.Namespace = ""
+		filename := sec.Name + ".yaml"
+		if err := writeK8sResource(baseDir, filename, sec); err != nil {
 			return nil, err
 		}
 		resources = append(resources, filename)

@@ -19,8 +19,16 @@ func generateStatefulSet(name string, svc *parser.ServiceConfig, opts ConvertOpt
 
 	container := buildContainer(name, svc, opts)
 
+	// Init containers for depends_on
+	var initContainers []corev1.Container
+	if len(svc.DependsOn) > 0 {
+		initContainers = buildInitContainers(svc.DependsOn)
+	}
+
 	podSpec := corev1.PodSpec{
-		Containers: []corev1.Container{container},
+		Containers:         []corev1.Container{container},
+		InitContainers:     initContainers,
+		ServiceAccountName: name,
 	}
 
 	if opts.AddSecurity {

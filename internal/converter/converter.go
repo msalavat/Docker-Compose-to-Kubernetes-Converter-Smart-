@@ -28,11 +28,12 @@ type ConvertOptions struct {
 // DefaultOptions returns ConvertOptions with production-grade defaults.
 func DefaultOptions() ConvertOptions {
 	return ConvertOptions{
-		OutputDir:    "./k8s",
-		Namespace:    "default",
-		AddProbes:    true,
-		AddResources: true,
-		AddSecurity:  true,
+		OutputDir:        "./k8s",
+		Namespace:        "default",
+		AddProbes:        true,
+		AddResources:     true,
+		AddSecurity:      true,
+		AddNetworkPolicy: true,
 	}
 }
 

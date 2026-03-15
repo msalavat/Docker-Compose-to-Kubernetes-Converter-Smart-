@@ -22,9 +22,6 @@ var (
 			Foreground(lipgloss.Color("10")).
 			Bold(true)
 
-	warningStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("208"))
-
 	dimStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("240"))
 
