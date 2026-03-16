@@ -19,6 +19,7 @@ var (
 	outputDir    string
 	namespace    string
 	appName      string
+	composeFiles []string
 	helmOutput   bool
 	kustomizeOut bool
 	wizardMode   bool
@@ -37,6 +38,7 @@ var (
 func init() {
 	rootCmd.AddCommand(convertCmd)
 
+	convertCmd.Flags().StringArrayVarP(&composeFiles, "file", "f", nil, "Compose file(s) to use (can be specified multiple times)")
 	convertCmd.Flags().StringVarP(&outputDir, "output", "o", "./k8s", "Output directory")
 	convertCmd.Flags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace")
 	convertCmd.Flags().StringVar(&appName, "app-name", "", "Application name (default: from compose file name)")
@@ -62,6 +64,7 @@ var convertCmd = &cobra.Command{
 
 Examples:
   kompoze convert docker-compose.yml -o k8s/
+  kompoze convert -f docker-compose.yml -f docker-compose.override.yml
   kompoze convert --wizard docker-compose.yml
   kompoze convert --helm -o helm-chart/
   kompoze convert --kustomize -o kustomize/
@@ -69,18 +72,31 @@ Examples:
   kompoze convert --validate docker-compose.yml`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		composeFile := "docker-compose.yml"
-		if len(args) > 0 {
-			composeFile = args[0]
-		}
+		var compose *parser.ComposeFile
+		var err error
 
-		// Parse
-		if !quietFlag {
-			fmt.Printf("Parsing %s...", composeFile)
-		}
-		compose, err := parser.ParseComposeFile(composeFile)
-		if err != nil {
-			return fmt.Errorf("parsing compose file: %w", err)
+		if len(composeFiles) > 0 {
+			// Multi-file mode: -f flag(s) provided
+			if !quietFlag {
+				fmt.Printf("Parsing %d compose file(s)...", len(composeFiles))
+			}
+			compose, err = parser.ParseComposeFiles(composeFiles)
+			if err != nil {
+				return fmt.Errorf("parsing compose files: %w", err)
+			}
+		} else {
+			// Single-file mode: positional arg or default
+			composeFile := "docker-compose.yml"
+			if len(args) > 0 {
+				composeFile = args[0]
+			}
+			if !quietFlag {
+				fmt.Printf("Parsing %s...", composeFile)
+			}
+			compose, err = parser.ParseComposeFile(composeFile)
+			if err != nil {
+				return fmt.Errorf("parsing compose file: %w", err)
+			}
 		}
 		if !quietFlag {
 			fmt.Printf(" ✓ (%d services found)\n", len(compose.Services))
@@ -182,6 +198,11 @@ Examples:
 				fmt.Print("Validating...")
 			}
 			vErrors := validator.ValidateManifests(result)
+
+			// Run kubeconform schema validation if available
+			kcErrors := validator.ValidateWithKubeconform(result)
+			vErrors = append(vErrors, kcErrors...)
+
 			errCount := len(validator.FilterBySeverity(vErrors, "error"))
 			warnCount := len(validator.FilterBySeverity(vErrors, "warning"))
 

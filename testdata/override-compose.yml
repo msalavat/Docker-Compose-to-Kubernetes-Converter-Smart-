@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  web:
+    deploy:
+      replicas: 3
+    environment:
+      - DEBUG=true
+    ports:
+      - "443:443"
+
+  cache:
+    environment:
+      MAXMEMORY: "256mb"

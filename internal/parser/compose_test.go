@@ -706,3 +706,220 @@ func TestParseComposeFile_NotFound(t *testing.T) {
 		t.Fatal("expected error for nonexistent file")
 	}
 }
+
+// --- Multi-file merge tests ---
+
+func TestParseComposeFiles_NoPaths(t *testing.T) {
+	_, err := ParseComposeFiles(nil)
+	if err == nil {
+		t.Fatal("expected error for empty paths")
+	}
+}
+
+func TestParseComposeFiles_SingleFile(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "simple-compose.yml")
+	compose, err := ParseComposeFiles([]string{path})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(compose.Services) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(compose.Services))
+	}
+}
+
+func TestParseComposeFiles_MergeOverride(t *testing.T) {
+	basePath := filepath.Join("..", "..", "testdata", "simple-compose.yml")
+	overridePath := filepath.Join("..", "..", "testdata", "override-compose.yml")
+
+	compose, err := ParseComposeFiles([]string{basePath, overridePath})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should still have 2 services
+	if len(compose.Services) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(compose.Services))
+	}
+
+	web := compose.Services["web"]
+
+	// Image should be preserved from base
+	if web.Image != "nginx:1.25" {
+		t.Errorf("expected image nginx:1.25, got %s", web.Image)
+	}
+
+	// Deploy replicas should come from override
+	if web.Deploy == nil || web.Deploy.Replicas == nil || *web.Deploy.Replicas != 3 {
+		t.Errorf("expected 3 replicas from override, got %+v", web.Deploy)
+	}
+
+	// Ports should be appended (base 80:80 + override 443:443)
+	if len(web.Ports) != 2 {
+		t.Fatalf("expected 2 ports (appended), got %d", len(web.Ports))
+	}
+	if web.Ports[0].ContainerPort != 80 {
+		t.Errorf("expected first port container=80, got %d", web.Ports[0].ContainerPort)
+	}
+	if web.Ports[1].ContainerPort != 443 {
+		t.Errorf("expected second port container=443, got %d", web.Ports[1].ContainerPort)
+	}
+
+	// Environment should include the override value
+	if web.Environment["DEBUG"] != "true" {
+		t.Errorf("expected DEBUG=true from override, got %q", web.Environment["DEBUG"])
+	}
+
+	// Cache should have merged environment from override
+	cache := compose.Services["cache"]
+	if cache.Environment["MAXMEMORY"] != "256mb" {
+		t.Errorf("expected MAXMEMORY=256mb, got %q", cache.Environment["MAXMEMORY"])
+	}
+
+	// Cache image should be preserved from base
+	if cache.Image != "redis:7-alpine" {
+		t.Errorf("expected image redis:7-alpine, got %s", cache.Image)
+	}
+}
+
+func TestParseComposeFiles_OverrideEnvMerge(t *testing.T) {
+	base := []byte(`version: "3.8"
+services:
+  app:
+    image: myapp
+    environment:
+      FOO: bar
+      DB_HOST: localhost
+`)
+	override := []byte(`version: "3.8"
+services:
+  app:
+    environment:
+      DB_HOST: db.prod
+      NEW_VAR: hello
+`)
+
+	// Write temp files
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "docker-compose.yml")
+	overridePath := filepath.Join(dir, "docker-compose.override.yml")
+	if err := os.WriteFile(basePath, base, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overridePath, override, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compose, err := ParseComposeFiles([]string{basePath, overridePath})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	env := compose.Services["app"].Environment
+	if env["FOO"] != "bar" {
+		t.Errorf("expected FOO=bar preserved, got %q", env["FOO"])
+	}
+	if env["DB_HOST"] != "db.prod" {
+		t.Errorf("expected DB_HOST=db.prod from override, got %q", env["DB_HOST"])
+	}
+	if env["NEW_VAR"] != "hello" {
+		t.Errorf("expected NEW_VAR=hello from override, got %q", env["NEW_VAR"])
+	}
+}
+
+func TestParseComposeFiles_NewServiceInOverride(t *testing.T) {
+	base := []byte(`version: "3.8"
+services:
+  web:
+    image: nginx
+`)
+	override := []byte(`version: "3.8"
+services:
+  monitoring:
+    image: prometheus
+    ports:
+      - "9090:9090"
+`)
+
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "docker-compose.yml")
+	overridePath := filepath.Join(dir, "docker-compose.override.yml")
+	if err := os.WriteFile(basePath, base, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overridePath, override, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compose, err := ParseComposeFiles([]string{basePath, overridePath})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(compose.Services) != 2 {
+		t.Fatalf("expected 2 services, got %d", len(compose.Services))
+	}
+	if compose.Services["monitoring"].Image != "prometheus" {
+		t.Errorf("expected monitoring service with prometheus image")
+	}
+}
+
+func TestParseComposeFiles_VolumeAppend(t *testing.T) {
+	base := []byte(`version: "3.8"
+services:
+  app:
+    image: myapp
+    volumes:
+      - "data:/app/data"
+`)
+	override := []byte(`version: "3.8"
+services:
+  app:
+    volumes:
+      - "./config:/app/config"
+`)
+
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "docker-compose.yml")
+	overridePath := filepath.Join(dir, "docker-compose.override.yml")
+	if err := os.WriteFile(basePath, base, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(overridePath, override, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	compose, err := ParseComposeFiles([]string{basePath, overridePath})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	vols := compose.Services["app"].Volumes
+	if len(vols) != 2 {
+		t.Fatalf("expected 2 volumes (appended), got %d", len(vols))
+	}
+	if vols[0].Source != "data" {
+		t.Errorf("expected first volume source=data, got %s", vols[0].Source)
+	}
+	if vols[1].Source != "./config" {
+		t.Errorf("expected second volume source=./config, got %s", vols[1].Source)
+	}
+}
+
+func TestParseComposeFiles_InvalidOverride(t *testing.T) {
+	base := []byte(`version: "3.8"
+services:
+  web:
+    image: nginx
+`)
+
+	dir := t.TempDir()
+	basePath := filepath.Join(dir, "docker-compose.yml")
+	if err := os.WriteFile(basePath, base, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ParseComposeFiles([]string{basePath, "/nonexistent/override.yml"})
+	if err == nil {
+		t.Fatal("expected error for nonexistent override file")
+	}
+}
