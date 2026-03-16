@@ -29,6 +29,10 @@ Unlike existing tools that produce bare-minimum manifests, kompoze generates **p
 ## Quick Start
 
 ```bash
+# Install from source
+git clone https://github.com/msalavat/Docker-Compose-to-Kubernetes-Converter-Smart-.git
+cd Docker-Compose-to-Kubernetes-Converter-Smart- && make build && sudo cp bin/kompoze /usr/local/bin/
+
 # Basic conversion
 kompoze convert docker-compose.yml -o k8s/
 
