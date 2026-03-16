@@ -1,3 +1,4 @@
+// Package cmd implements the CLI commands for kompoze.
 package cmd
 
 import (
