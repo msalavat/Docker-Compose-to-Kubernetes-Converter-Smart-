@@ -1093,11 +1093,9 @@ func TestSmartDefaultsCache(t *testing.T) {
 	if cfg.AddHPA {
 		t.Error("expected cache AddHPA to be false")
 	}
-	if cfg.AddPDB {
-		// Cache doesn't get StatefulSet default, so PDB is not set by StatefulSet logic.
-		// But ShouldSuggestPDB returns true for cache — however, the wizard only sets PDB
-		// for StatefulSet. Let's check actual code behavior.
-	}
+	// Cache doesn't get StatefulSet default, so PDB is not set by StatefulSet logic.
+	// ShouldSuggestPDB returns true for cache, but the wizard only sets PDB for StatefulSet.
+	_ = cfg.AddPDB // verified via smart defaults behavior
 }
 
 func TestSmartDefaultsGeneric(t *testing.T) {

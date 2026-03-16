@@ -227,19 +227,20 @@ func buildProbesFromHealthcheck(hc *parser.HealthcheckConfig) (*corev1.Probe, *c
 	}
 
 	// Parse CMD or CMD-SHELL
-	if test[0] == "CMD" {
+	switch test[0] {
+	case "CMD":
 		handler = corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{
 				Command: test[1:],
 			},
 		}
-	} else if test[0] == "CMD-SHELL" {
+	case "CMD-SHELL":
 		handler = corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{
 				Command: []string{"/bin/sh", "-c", strings.Join(test[1:], " ")},
 			},
 		}
-	} else {
+	default:
 		// Plain string command
 		handler = corev1.ProbeHandler{
 			Exec: &corev1.ExecAction{
@@ -332,11 +333,7 @@ func convertComposeResources(res *parser.Resources) corev1.ResourceRequirements 
 
 func buildPodSecurityContext(svc *parser.ServiceConfig) *corev1.PodSecurityContext {
 	fsGroup := int64(1000)
-	runAsNonRoot := true
-
-	if svc.Privileged {
-		runAsNonRoot = false
-	}
+	runAsNonRoot := !svc.Privileged
 
 	return &corev1.PodSecurityContext{
 		RunAsNonRoot: &runAsNonRoot,

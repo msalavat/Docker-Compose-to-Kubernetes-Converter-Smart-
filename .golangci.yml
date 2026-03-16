@@ -11,6 +11,11 @@ linters:
     - ineffassign
     - staticcheck
     - unused
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+        - "-QF*"
   exclusions:
     rules:
       - path: _test\.go

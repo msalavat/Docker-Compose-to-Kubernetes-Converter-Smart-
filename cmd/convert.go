@@ -236,7 +236,7 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("rendering manifests: %w", err)
 			}
-			fmt.Fprint(os.Stdout, content)
+			_, _ = fmt.Fprint(os.Stdout, content)
 			return nil
 		}
 
