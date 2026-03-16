@@ -1,3 +1,4 @@
+// Package validator checks generated Kubernetes manifests for correctness and best practices.
 package validator
 
 import (

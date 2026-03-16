@@ -1,3 +1,4 @@
+// Package output writes serialized Kubernetes manifests to files or stdout.
 package output
 
 import (

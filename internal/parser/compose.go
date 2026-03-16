@@ -1,3 +1,4 @@
+// Package parser reads and normalizes Docker Compose v3.8+ files into structured Go types.
 package parser
 
 import (

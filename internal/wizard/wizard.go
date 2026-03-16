@@ -1,3 +1,4 @@
+// Package wizard provides an interactive TUI for configuring Kubernetes conversion options.
 package wizard
 
 import (

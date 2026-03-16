@@ -1,3 +1,4 @@
+// Package helm generates Helm chart scaffolding from converted Kubernetes manifests.
 package helm
 
 import (

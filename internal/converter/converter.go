@@ -1,3 +1,4 @@
+// Package converter transforms parsed Docker Compose services into Kubernetes resource manifests.
 package converter
 
 import (

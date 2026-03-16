@@ -1,3 +1,4 @@
+// Package kustomize generates Kustomize base and overlay structures from converted manifests.
 package kustomize
 
 import (

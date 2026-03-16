@@ -1,3 +1,4 @@
+// Package internal_test contains integration tests for the full compose-to-Kubernetes conversion pipeline.
 package internal_test
 
 import (
