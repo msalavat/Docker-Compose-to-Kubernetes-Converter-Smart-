@@ -2,7 +2,7 @@
 
 Smart Docker Compose to Kubernetes converter with production-grade defaults.
 
-[![CI](https://github.com/compositor/kompoze/actions/workflows/ci.yml/badge.svg)](https://github.com/compositor/kompoze/actions/workflows/ci.yml)
+[![CI](https://github.com/msalavat/Docker-Compose-to-Kubernetes-Converter-Smart-/actions/workflows/ci.yml/badge.svg)](https://github.com/msalavat/Docker-Compose-to-Kubernetes-Converter-Smart-/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/compositor/kompoze)](https://goreportcard.com/report/github.com/compositor/kompoze)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -15,13 +15,16 @@ Unlike existing tools that produce bare-minimum manifests, kompoze generates **p
 | Resource limits | - | Auto-detected defaults |
 | Health probes | - | Smart defaults by port type |
 | Security context | - | Restrictive by default |
+| StatefulSet for databases | - | Auto-detected by image name |
 | Helm chart output | - | Full chart with values.yaml |
 | Kustomize output | - | base + overlays (dev/staging/prod) |
 | Interactive wizard | - | TUI wizard with smart suggestions |
-| Built-in validation | - | Validates generated manifests |
-| NetworkPolicy | - | Auto-generated from depends_on |
-| HPA | - | Auto for non-database services |
-| PDB | - | Auto for replicas > 1 |
+| Built-in validation | - | Local checks + kubeconform |
+| NetworkPolicy | - | Auto-generated |
+| HPA | - | Auto for web/app servers |
+| PDB | - | Auto for multi-replica services |
+| ServiceAccount | - | Per-service with automount disabled |
+| Multi-file merge | - | `-f base.yml -f override.yml` |
 
 ## Quick Start
 
@@ -56,15 +59,15 @@ go install github.com/compositor/kompoze@latest
 ### From source
 
 ```bash
-git clone https://github.com/compositor/kompoze.git
-cd kompoze
+git clone https://github.com/msalavat/Docker-Compose-to-Kubernetes-Converter-Smart-.git
+cd Docker-Compose-to-Kubernetes-Converter-Smart-
 make build
 ./bin/kompoze --help
 ```
 
 ### Binary releases
 
-Download from [GitHub Releases](https://github.com/compositor/kompoze/releases).
+Download pre-built binaries (Linux, macOS, Windows / amd64, arm64) from [GitHub Releases](https://github.com/msalavat/Docker-Compose-to-Kubernetes-Converter-Smart-/releases).
 
 ## Usage
 
@@ -74,17 +77,27 @@ Download from [GitHub Releases](https://github.com/compositor/kompoze/releases).
 kompoze convert docker-compose.yml -o k8s/
 ```
 
-Generates for each service:
+Generates up to 11 resource types per service:
 - **Deployment** with resource limits, health probes, security context
-- **Service** (ClusterIP) for services with ports
+- **StatefulSet** for databases (auto-detected by image: postgres, mysql, mongo, etc.)
+- **Service** (ClusterIP for Deployments, headless for StatefulSets)
 - **ConfigMap** for non-sensitive environment variables
-- **Secret** references for sensitive variables (PASSWORD, TOKEN, etc.)
-- **PVC** for named volumes
+- **Secret** references for sensitive variables (PASSWORD, SECRET, TOKEN, KEY, CREDENTIALS, PRIVATE_KEY, API_KEY)
+- **PersistentVolumeClaim** for named volumes (10Gi default for databases, 1Gi for others)
 - **ServiceAccount** with automount disabled
-- **Ingress** for HTTP services
-- **HPA** for non-database services
-- **PDB** for services with replicas > 1
-- **NetworkPolicy** based on depends_on relationships
+- **Ingress** for HTTP services (web servers)
+- **HorizontalPodAutoscaler** for web/app servers (min=2, max=10, CPU target=70%)
+- **PodDisruptionBudget** for multi-replica and database services
+- **NetworkPolicy** with DNS egress and managed-by ingress rules
+
+### Multi-file Compose
+
+```bash
+# Merge base + override (standard Docker Compose behavior)
+kompoze convert -f docker-compose.yml -f docker-compose.prod.yml -o k8s/
+```
+
+Override files merge sequentially: scalar fields override, environment maps merge (override wins), ports and volumes append.
 
 ### Helm Chart Output
 
@@ -92,18 +105,27 @@ Generates for each service:
 kompoze convert docker-compose.yml --helm -o my-chart/
 ```
 
-Generates a complete Helm chart:
+Generates a complete Helm v3 chart:
 ```
 my-chart/
   Chart.yaml
-  values.yaml          # All configurable parameters
+  values.yaml              # All configurable parameters per service
   templates/
-    _helpers.tpl
-    NOTES.txt
+    _helpers.tpl            # Common template functions
+    NOTES.txt               # Installation notes
     <service>-deployment.yaml
     <service>-service.yaml
-    ...
+    <service>-configmap.yaml
+    <service>-secret.yaml
+    <service>-pvc.yaml
+    <service>-ingress.yaml
+    <service>-hpa.yaml
+    <service>-pdb.yaml
+    <service>-networkpolicy.yaml
+    <service>-serviceaccount.yaml
 ```
+
+Each service in `values.yaml` has toggles: `enabled`, `ingress.enabled`, `hpa.enabled`, `pdb.enabled`, `persistence.enabled` with full customization of image, replicas, resources, env, and secrets.
 
 ### Kustomize Output
 
@@ -114,11 +136,11 @@ kompoze convert docker-compose.yml --kustomize -o kustomize/
 Generates:
 ```
 kustomize/
-  base/                # Common resources
+  base/                    # All resources + kustomization.yaml
   overlays/
-    dev/               # Minimal resources, 1 replica
-    staging/           # Medium resources, 2 replicas
-    prod/              # Full resources, HPA, PDB, Ingress
+    dev/                   # Minimal resources, 1 replica
+    staging/               # Medium resources, 2 replicas
+    prod/                  # Full resources, HPA, PDB, Ingress
 ```
 
 ### Interactive Wizard
@@ -127,12 +149,20 @@ kustomize/
 kompoze convert docker-compose.yml --wizard
 ```
 
-The wizard analyzes your compose file and provides smart suggestions:
-- Detects service types (web server, database, cache, app server)
-- Suggests StatefulSet for databases
-- Suggests Ingress for web servers
-- Suggests HPA for application servers
-- Auto-detects sensitive environment variables
+The TUI wizard (Bubble Tea + Lipgloss) guides through 4 phases:
+1. **Namespace** - custom namespace input
+2. **Output format** - manifests / Helm / Kustomize
+3. **Per-service config** - replicas, Ingress, TLS (cert-manager), HPA, PDB
+4. **Summary** - review and confirm
+
+Smart suggestions based on detected service type:
+| Service Type | Images | Suggestions |
+|-------------|--------|-------------|
+| web-server | nginx, httpd, apache, traefik, caddy, haproxy, envoy | Ingress, HPA, TLS, replicas=2 |
+| database | postgres, mysql, mariadb, mongo, cockroach, cassandra, elasticsearch, opensearch, couchdb, neo4j, influxdb | StatefulSet, PDB, PVC 10Gi |
+| cache | redis, memcached, valkey | PDB |
+| app-server | node, python, golang, java, ruby, php, dotnet, flask, django, express, spring, laravel, rails | HPA |
+| generic | (default) | Basic defaults |
 
 ### Validation
 
@@ -144,6 +174,18 @@ kompoze convert docker-compose.yml --validate
 kompoze convert docker-compose.yml --validate --strict
 ```
 
+Built-in checks (3 severity levels: error, warning, info):
+- Image tag validation (warns on `latest` or untagged)
+- Resource limits presence
+- Health probe presence
+- Security context verification
+- Deployment/StatefulSet structure (selectors, containers, serviceName)
+- Service port consistency
+- Ingress rules validation
+- PVC access modes
+
+Optional [kubeconform](https://github.com/yannh/kubeconform) integration validates against Kubernetes OpenAPI schemas when available on PATH.
+
 ### All Flags
 
 ```
@@ -153,7 +195,7 @@ Flags:
   -f, --file stringArray     Compose files (can be specified multiple times)
   -o, --output string        Output directory (default "./k8s")
   -n, --namespace string     Kubernetes namespace (default "default")
-      --app-name string      Application name
+      --app-name string      Application name (default: from compose file name)
       --helm                 Generate Helm chart
       --kustomize            Generate Kustomize structure
       --wizard               Interactive wizard mode
@@ -166,41 +208,55 @@ Flags:
       --single-file          Output all manifests in single file
   -q, --quiet                Suppress non-error output
   -v, --verbose              Verbose output
-      --dry-run              Print manifests to stdout
+      --dry-run              Print manifests to stdout, don't write files
 ```
 
 ## Smart Defaults
 
-kompoze generates production-grade manifests with these defaults:
+kompoze generates production-grade manifests with these defaults (all toggleable via flags):
 
-**Resource Limits:**
+**Resource Limits** (`--no-resources` to disable):
 - Requests: 100m CPU, 128Mi memory
 - Limits: 500m CPU, 256Mi memory
-- Uses compose `deploy.resources` when specified
+- Overridden by compose `deploy.resources` when specified
 
-**Health Probes:**
-- HTTP ports (80, 8080, 3000, etc.) get `httpGet` probes
+**Health Probes** (`--no-probes` to disable):
+- HTTP ports (80, 443, 8080, 3000, 5000, 8000, 8443) get `httpGet` probes on `/`
 - Other ports get `tcpSocket` probes
-- Compose `healthcheck` maps to liveness + readiness probes
+- Liveness: initialDelay=10s, period=15s, timeout=5s, failureThreshold=3
+- Readiness: initialDelay=5s, period=15s, timeout=5s, failureThreshold=3
+- Compose `healthcheck` maps to both liveness and readiness probes
 
-**Security Context:**
+**Security Context** (`--no-security` to disable):
 - Pod: `runAsNonRoot: true`, `fsGroup: 1000`
 - Container: `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`
 - Capabilities: drop ALL, add only what's in compose `cap_add`
+- Exception: `privileged: true` services get `runAsNonRoot: false`
+
+**Network Policy** (`--no-network-policy` to disable):
+- Egress: allows DNS (UDP/TCP port 53)
+- Ingress: allows from pods with `app.kubernetes.io/managed-by: kompoze`
+
+**Labels** (app.kubernetes.io/* convention):
+- `app.kubernetes.io/name: <service-name>`
+- `app.kubernetes.io/managed-by: kompoze`
+- `app.kubernetes.io/part-of: <app-name>` (when `--app-name` provided)
 
 ## Supported Docker Compose Features
 
-- docker-compose v3.8+ (files without `version` also accepted)
+- Docker Compose v3.8+ (files without `version` also accepted)
 - Multi-file merge (`-f base.yml -f override.yml`)
-- Environment variable expansion: `${VAR}`, `${VAR:-default}`, `${VAR-default}`
-- Services: image, command, entrypoint, ports, volumes, environment, env_file
-- Networking: depends_on (simple + extended), networks, expose
-- Health: healthcheck (test, interval, timeout, retries, start_period)
-- Deploy: replicas, resources (limits/reservations), restart_policy, placement
-- Security: privileged, read_only, cap_add, cap_drop, user, security_opt
-- Volumes: named volumes, tmpfs (bind mounts produce warnings)
-- Labels: both list (`"key=value"`) and map format
-- Build: parsed but ignored (K8s requires pre-built images)
+- **Services**: image, container_name, command, entrypoint, ports, volumes, environment, env_file, expose
+- **Ports**: short (`8080:80`, `8080:80/udp`) and long syntax (`target`, `published`, `protocol`)
+- **Volumes**: short (`name:/path`, `./path:/container:ro`) and long syntax (`type`, `source`, `target`, `read_only`)
+- **Environment**: both list (`KEY=value`) and map (`KEY: value`) formats
+- **Networking**: depends_on (simple list + extended with `condition`), networks (list + map with aliases)
+- **Health**: healthcheck (test, interval, timeout, retries, start_period, disable)
+- **Deploy**: replicas, resources (limits/reservations), restart_policy, placement, labels
+- **Security**: privileged, read_only, cap_add, cap_drop, user, security_opt
+- **Other**: working_dir, stdin_open, tty, sysctls, extra_hosts, dns, dns_search, logging, labels (list + map), restart
+- **Top-level**: volumes, networks, secrets, configs
+- **Build**: parsed but ignored with warning (K8s requires pre-built images)
 
 ## Real-World Examples
 
@@ -242,9 +298,9 @@ kompoze convert docker-compose.yml -o k8s/ --validate
 ```
 
 **What kompoze generates:**
-- `wordpress` → Deployment + Service + Ingress + HPA + ConfigMap + Secret
-- `mysql` → StatefulSet (auto-detected) + headless Service + Secret + PDB
-- PVCs for both volumes, NetworkPolicies from `depends_on`
+- `wordpress` -> Deployment + Service + Ingress + HPA + ConfigMap + Secret + ServiceAccount + NetworkPolicy
+- `mysql` -> StatefulSet (auto-detected) + headless Service + Secret + PDB + ServiceAccount + NetworkPolicy
+- PVCs for both volumes (1Gi for wp-content, 10Gi for mysql-data)
 
 ### Microservices Architecture
 
@@ -282,61 +338,54 @@ kompoze convert docker-compose.yml --kustomize -o deploy/
 ```
 
 **Smart detection:**
-- `gateway` (nginx) → web-server → Deployment + Ingress + HPA
-- `users-api` (node) → app-server → Deployment + HPA
-- `users-db` (postgres) → database → StatefulSet + PDB + 10Gi PVC
-
-### Multiple Compose Files
-
-```bash
-# Merge base + override (standard Docker Compose behavior)
-kompoze convert -f docker-compose.yml -f docker-compose.prod.yml -o k8s/
-```
+- `gateway` (nginx) -> web-server -> Deployment + Ingress + HPA
+- `users-api` (node) -> app-server -> Deployment + HPA
+- `users-db` (postgres) -> database -> StatefulSet + PDB + 10Gi PVC
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                      CLI (cobra)                     │
-│  convert --helm --wizard --validate -o output/       │
-└──────────┬──────────────────────────────┬────────────┘
-           │                              │
-    ┌──────▼──────┐               ┌───────▼──────┐
-    │   Parser    │               │   Wizard     │
-    │ compose.yml │               │  (Bubble Tea)│
-    │  v3.8+      │               │  TUI prompts │
-    └──────┬──────┘               └───────┬──────┘
-           │ ComposeFile                  │ WizardConfig
-           └──────────┬──────────────────┘
-                      │
-               ┌──────▼──────┐
-               │  Converter  │
-               │  K8s types  │
-               └──────┬──────┘
-                      │ ConvertResult
-         ┌────────────┼────────────┐
-         │            │            │
-  ┌──────▼──┐  ┌──────▼──┐  ┌─────▼─────┐
-  │  Output  │  │  Helm   │  │ Kustomize │
-  │  YAML    │  │  Chart  │  │ base +    │
-  │  files   │  │ values  │  │ overlays  │
-  └──────────┘  └─────────┘  └───────────┘
-         │
-  ┌──────▼──────┐
-  │  Validator  │
-  │ local checks│
-  │ +kubeconform│
-  └─────────────┘
+                    ┌─────────────────────────────────────────────────────┐
+                    │                      CLI (cobra)                     │
+                    │  convert --helm --wizard --validate -o output/       │
+                    └──────────┬──────────────────────────────┬────────────┘
+                               │                              │
+                        ┌──────▼──────┐               ┌───────▼──────┐
+                        │   Parser    │               │   Wizard     │
+                        │ compose.yml │               │  (Bubble Tea)│
+                        │  v3.8+      │               │  TUI prompts │
+                        └──────┬──────┘               └───────┬──────┘
+                               │ ComposeFile                  │ WizardConfig
+                               └──────────┬──────────────────┘
+                                          │
+                                   ┌──────▼──────┐
+                                   │  Converter  │
+                                   │  K8s types  │
+                                   └──────┬──────┘
+                                          │ ConvertResult (11 resource types)
+                         ┌────────────────┼────────────────┐
+                         │                │                 │
+                  ┌──────▼──────┐  ┌──────▼──────┐  ┌──────▼──────┐
+                  │   Output    │  │    Helm     │  │  Kustomize  │
+                  │  YAML files │  │  Chart +    │  │  base +     │
+                  │  or stdout  │  │  values.yaml│  │  3 overlays │
+                  └──────┬──────┘  └─────────────┘  └─────────────┘
+                         │
+                  ┌──────▼──────┐
+                  │  Validator  │
+                  │ local checks│
+                  │ +kubeconform│
+                  └─────────────┘
 ```
 
 **Resource Generation Pipeline:**
 
 For each compose service, the converter:
-1. Detects service type by image name (web-server, database, cache, app-server)
+1. Detects service type by image name (web-server, database, cache, app-server, generic)
 2. Generates workload (Deployment or StatefulSet for databases)
 3. Adds smart defaults (probes, resource limits, security context)
-4. Creates supporting resources (Service, ConfigMap, Secret, PVC, etc.)
-5. Auto-generates Ingress/HPA/PDB based on service type
+4. Creates supporting resources (Service, ConfigMap, Secret, PVC, ServiceAccount)
+5. Auto-generates Ingress/HPA/PDB/NetworkPolicy based on service type and config
 
 ## Troubleshooting
 
@@ -350,7 +399,7 @@ Files without a `version` field are also accepted (Compose Spec v3+ implied).
 
 ### Sensitive variables not going to Secrets
 
-kompoze auto-detects sensitive variables by key name patterns: `PASSWORD`, `SECRET`, `TOKEN`, `KEY`, `CREDENTIALS`. If your variable doesn't match, rename the key or use the `--wizard` mode to manually configure Secret generation.
+kompoze auto-detects sensitive variables by key name patterns: `PASSWORD`, `SECRET`, `TOKEN`, `KEY`, `CREDENTIALS`, `PRIVATE_KEY`, `API_KEY`. If your variable doesn't match, rename the key or use the `--wizard` mode to manually configure Secret generation.
 
 ### StatefulSet not generated for my database
 
@@ -377,7 +426,7 @@ Use `--wizard` mode to disable HPA per-service, or pass `--no-probes --no-resour
 ## Known Limitations
 
 - Only docker-compose v3.8+ is supported (v2.x is not supported)
-- `build` configurations are ignored (K8s needs pre-built images)
+- `build` configurations are parsed but ignored (K8s needs pre-built images)
 - `network_mode: host` is not converted
 - Bind mounts map to `hostPath` (not recommended for production)
 - `links` are deprecated in compose v3+ and not supported
@@ -386,11 +435,17 @@ Use `--wizard` mode to disable HPA per-service, or pass `--no-probes --no-resour
 ## Development
 
 ```bash
-make build         # Build binary
-make test          # Run tests
-make lint          # Run linter
-make coverage      # Generate coverage report
+make build              # Build binary
+make test               # Run unit tests (with -race)
+make test-integration   # Run integration tests
+make lint               # Run golangci-lint
+make coverage           # Generate coverage report (coverage.html)
+make install            # Install to $GOPATH/bin
+make clean              # Remove bin/, dist/, coverage.*
+make release            # GoReleaser snapshot release
 ```
+
+**Test coverage:** 141 tests across 9 packages (parser: 36, wizard: 31, converter: 19, cmd: 18, integration: 9, kustomize: 7, validator: 9, helm: 6, output: 6).
 
 ## Contributing
 
