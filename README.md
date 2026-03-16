@@ -29,9 +29,6 @@ Unlike existing tools that produce bare-minimum manifests, kompoze generates **p
 ## Quick Start
 
 ```bash
-# Install
-go install github.com/compositor/kompoze@latest
-
 # Basic conversion
 kompoze convert docker-compose.yml -o k8s/
 
@@ -49,12 +46,6 @@ kompoze convert docker-compose.yml --dry-run
 ```
 
 ## Installation
-
-### Go install
-
-```bash
-go install github.com/compositor/kompoze@latest
-```
 
 ### From source
 
